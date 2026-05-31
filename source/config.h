@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <list>
 #include <string>
 #include <algorithm>
 #include <map>
@@ -45,6 +46,7 @@ struct PackageInstallData
 {
     HostInfo host_info;
     std::string path;
+    uint64_t file_size;
     uint64_t timestamp;
 };
 
@@ -55,12 +57,13 @@ struct BgDownloadData {
     uint64_t bytes_transfered;
     uint64_t file_size;
     DownloadState state;
+    std::string fail_reason;
     uint64_t id;
     uint64_t timestamp;
 };
 
 extern uint64_t *g_bytes_transfered;
-extern std::vector<BgDownloadData> bg_download_list;
+extern std::list<BgDownloadData> bg_download_list;
 
 namespace CONFIG
 {
@@ -72,5 +75,7 @@ namespace CONFIG
     void AddBgDownloadData(BgDownloadData bg_download_data);
     void LoadBgDownloadData();
     void SaveBgDownloadData();
+    void LockDownloadList();
+    void UnlockDownloadList();
 }
 #endif

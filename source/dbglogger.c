@@ -304,18 +304,55 @@ void dbglogger_printf(const char* fmt, ...) {
         va_start(arg, fmt);
         vsnprintf(buffer, sizeof(buffer), fmt, arg);
         va_end(arg);
+
+        static __thread int new_line = 1;
+        char out_buffer[0x1000];
+        char* p = buffer;
+        char* out_p = out_buffer;
+        int out_len = 0;
+        
+        while (*p) {
+            if (new_line) {
+#ifdef EZREMOTE_VERSION
+                const char* source = "server";
+#else
+                const char* source = "client";
+#endif
+#ifdef __PSP__
+                ScePspDateTime t;
+                sceRtcGetCurrentClockLocalTime(&t);
+                out_len += snprintf(out_p, sizeof(out_buffer) - out_len, "[%d-%02d-%02d %02d:%02d:%02d][%s] ", t.year, t.month, t.day, t.hour, t.minute, t.second, source);
+#else
+                struct tm t = *gmtime(&(time_t){time(NULL)});
+                out_len += snprintf(out_p, sizeof(out_buffer) - out_len, "[%d-%02d-%02d %02d:%02d:%02d][%s] ", t.tm_year+1900, t.tm_mon+1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, source);
+#endif
+                out_p = out_buffer + out_len;
+                new_line = 0;
+            }
+            
+            *out_p++ = *p;
+            out_len++;
+            
+            if (*p == '\n') {
+                new_line = 1;
+            }
+            p++;
+            
+            if (out_len >= (int)(sizeof(out_buffer) - 1)) break;
+        }
+        *out_p = '\0';
     
         switch (loggerMode) {
             case UDP_LOGGER:
             case TCP_LOGGER:
-                netSend(socketFD, buffer, strlen(buffer), 0);
+                netSend(socketFD, out_buffer, strlen(out_buffer), 0);
                 break;
 
             case FILE_LOGGER:
-                fileLog(buffer);
+                fileLog(out_buffer);
                 break;
             case TTY_LOGGER:
-                printf("%s", buffer); // puts always append newline
+                printf("%s", out_buffer); // puts always append newline
                 break;
         }
     }
@@ -329,15 +366,8 @@ void dbglogger_log(const char* fmt, ...) {
         va_start(arg, fmt);
         vsnprintf(buffer, sizeof(buffer), fmt, arg);
         va_end(arg);
-#ifdef __PSP__
-        ScePspDateTime t;
-        sceRtcGetCurrentClockLocalTime(&t);
-        dbglogger_printf("[%d-%02d-%02d %02d:%02d:%02d] %s\n", t.year, t.month, t.day, t.hour, t.minute, t.second, buffer);
-#else
-        struct tm t = *gmtime(&(time_t){time(NULL)});
-    
-        dbglogger_printf("[%d-%02d-%02d %02d:%02d:%02d] %s\n", t.tm_year+1900, t.tm_mon+1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, buffer);
-#endif
+
+        dbglogger_printf("%s\n", buffer);
     }
 }
 

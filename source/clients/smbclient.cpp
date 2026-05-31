@@ -18,10 +18,13 @@
 
 SmbClient::SmbClient()
 {
+	smb2 = nullptr;
 }
 
 SmbClient::~SmbClient()
 {
+	if (smb2 != nullptr)
+		Quit();
 }
 
 int SmbClient::Connect(const std::string &url, const std::string &user, const std::string &pass)
@@ -38,6 +41,10 @@ int SmbClient::Connect(const std::string &url, const std::string &user, const st
 	smb_url = smb2_parse_url(smb2, url.c_str());
 	if (smb_url == NULL || smb_url->share == NULL || strlen(smb_url->share) == 0)
 	{
+		if (smb_url != NULL)
+			smb2_destroy_url(smb_url);
+		smb2_destroy_context(smb2);
+		smb2 = NULL;
 		sprintf(response, "Invalid SMB Url");
 		return 0;
 	}
@@ -51,6 +58,9 @@ int SmbClient::Connect(const std::string &url, const std::string &user, const st
 	if (smb2_connect_share(smb2, smb_url->server, smb_url->share, user.c_str()) < 0)
 	{
 		sprintf(response, "%s", smb2_get_error(smb2));
+		smb2_destroy_url(smb_url);
+		smb2_destroy_context(smb2);
+		smb2 = NULL;
 		return 0;
 	}
 
@@ -111,10 +121,17 @@ int SmbClient::Get(const std::string &outputfile, const std::string &ppath, uint
 	if (out == NULL)
 	{
 		// sprintf(response, "%s", lang_strings[STR_FAILED]);
+		smb2_close(smb2, in);
 		return 0;
 	}
 
 	uint8_t *buff = (uint8_t*)malloc(max_read_size);
+	if (buff == NULL)
+	{
+		FS::Close(out);
+		smb2_close(smb2, in);
+		return 0;
+	}
 	int count = 0;
 	*g_bytes_transfered = offset;
 
@@ -123,7 +140,7 @@ int SmbClient::Get(const std::string &outputfile, const std::string &ppath, uint
 		smb2_lseek(smb2, in, offset, SEEK_SET, NULL);
 	}
 
-	while ((count = smb2_read(smb2, in, buff, max_read_size)) > 0)
+	while ((count = smb2_read(smb2, in, buff, max_read_size)) != 0)
 	{
 		if (count < 0)
 		{
@@ -168,6 +185,8 @@ int SmbClient::GetRange(void *fp, DataSink &sink, uint64_t size, uint64_t offset
 	smb2_lseek(smb2, in, offset, SEEK_SET, NULL);
 
 	uint8_t *buff = (uint8_t *)malloc(max_read_size);
+	if (buff == NULL)
+		return 0;
 	int count = 0;
 	size_t bytes_remaining = size;
 	do
@@ -192,5 +211,5 @@ int SmbClient::GetRange(void *fp, DataSink &sink, uint64_t size, uint64_t offset
 
 	free((char *)buff);
 
-	return 1;
+	return bytes_remaining == 0;
 }

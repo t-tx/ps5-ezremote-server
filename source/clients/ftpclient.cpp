@@ -568,11 +568,15 @@ int FtpClient::FtpOpenPasv(ftphandle *nControl, ftphandle **nData, transfermode 
 	}
 
 	if (nControl->dir != FTP_CLIENT_CONTROL)
+	{
+		close(sData);
 		return -1;
+	}
 	std::string tmp = cmd + "\r\n";
 	ret = send(nControl->handle, tmp.c_str(), tmp.length(), 0);
 	if (ret <= 0)
 	{
+		close(sData);
 		return -1;
 	}
 
@@ -699,7 +703,10 @@ int FtpClient::FtpOpenPort(ftphandle *nControl, ftphandle **nData, transfermode 
 		return -1;
 	}
 	if (getsockname(sData, &sin.sa, &l) < 0)
+	{
+		close(sData);
 		return 0;
+	}
 	sprintf(buf, "PORT %hhu,%hhu,%hhu,%hhu,%hhu,%hhu",
 			(unsigned char)sin.sa.sa_data[2],
 			(unsigned char)sin.sa.sa_data[3],
@@ -739,8 +746,10 @@ int FtpClient::FtpOpenPort(ftphandle *nControl, ftphandle **nData, transfermode 
 
 	if (!FtpSendCmd(cmd, "1", nControl))
 	{
-		FtpClose(*nData);
-		*nData = NULL;
+		if (ctrl->buf != NULL)
+			free(ctrl->buf);
+		free(ctrl);
+		close(sData);
 		return -1;
 	}
 
@@ -1239,7 +1248,13 @@ int FtpClient::GetRange(const std::string &path, DataSink &sink, uint64_t size, 
 		return 0;
 	}
 
-	char buf[FTP_CLIENT_BUFSIZ];
+	char *buf = static_cast<char *>(malloc(FTP_CLIENT_BUFSIZ));
+	if (buf == nullptr)
+	{
+		FtpClose(nData);
+		mp_ftphandle->offset = 0;
+		return 0;
+	}
 	int count = 0;
 	size_t bytes_remaining = size;
 
@@ -1253,6 +1268,7 @@ int FtpClient::GetRange(const std::string &path, DataSink &sink, uint64_t size, 
 			bool ok = sink.write((char *)buf, count);
 			if (!ok)
 			{
+				free(buf);
 				FtpClose(nData);
 				mp_ftphandle->offset = 0;
 				return 0;
@@ -1263,10 +1279,11 @@ int FtpClient::GetRange(const std::string &path, DataSink &sink, uint64_t size, 
 			break;
 		}
 	} while (1);
+	free(buf);
 	FtpClose(nData);
 	mp_ftphandle->offset = 0;
 
-	return 1;
+	return bytes_remaining == 0;
 }
 
 int FtpClient::GetRange(const std::string &path, void *buffer, uint64_t size, uint64_t offset)

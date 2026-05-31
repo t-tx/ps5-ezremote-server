@@ -4,6 +4,7 @@
 #include <cstring>
 #include <map>
 #include <vector>
+#include <list>
 #include <regex>
 #include <shared_mutex>
 #include <stdlib.h>
@@ -16,7 +17,7 @@
 #include "util.h"
 
 static std::map<std::string, PackageInstallData> pkg_download_history;
-std::vector<BgDownloadData> bg_download_list;
+std::list<BgDownloadData> bg_download_list;
 
 unsigned char cipher_key[32] = {'s', '5', 'v', '8', 'y', '/', 'B', '?', 'E', '(', 'H', '+', 'M', 'b', 'Q', 'e', 'T', 'h', 'W', 'm', 'Z', 'q', '4', 't', '7', 'w', '9', 'z', '$', 'C', '&', 'F'};
 unsigned char cipher_iv[16] = {'Y', 'p', '3', 's', '6', 'v', '9', 'y', '$', 'B', '&', 'E', ')', 'H', '@', 'M'};
@@ -97,6 +98,8 @@ namespace CONFIG
                 history_item.host_info.username = std::string(json_object_get_string(json_object_object_get(history_item_obj, "username")));
                 std::string encrypted_password = std::string(json_object_get_string(json_object_object_get(history_item_obj, "password")));
                 history_item.host_info.type = json_object_get_int(json_object_object_get(history_item_obj, "type"));
+                json_object *size_obj = json_object_object_get(history_item_obj, "size");
+                history_item.file_size = size_obj != nullptr ? json_object_get_uint64(size_obj) : 0;
                 history_item.timestamp = json_object_get_uint64(json_object_object_get(history_item_obj, "timestamp"));
                 history_item.host_info.client = nullptr;
 
@@ -138,6 +141,7 @@ namespace CONFIG
                 json_object_object_add(history_item_obj, "path", json_object_new_string(it->second.path.c_str()));
                 json_object_object_add(history_item_obj, "username", json_object_new_string(it->second.host_info.username.c_str()));
                 json_object_object_add(history_item_obj, "type", json_object_new_int(it->second.host_info.type));
+                json_object_object_add(history_item_obj, "size", json_object_new_uint64(it->second.file_size));
                 json_object_object_add(history_item_obj, "timestamp", json_object_new_uint64(it->second.timestamp));
                 if (it->second.host_info.type == CLIENT_TYPE_HTTP_SERVER)
                 {
@@ -198,6 +202,13 @@ namespace CONFIG
                 history_item.file_size = json_object_get_uint64(json_object_object_get(history_item_obj, "file_size"));
                 history_item.bytes_transfered = json_object_get_uint64(json_object_object_get(history_item_obj, "bytes_transfered"));
                 history_item.state = static_cast<DownloadState>(json_object_get_int(json_object_object_get(history_item_obj, "state")));
+                
+                json_object *fail_reason_obj = json_object_object_get(history_item_obj, "fail_reason");
+                if (fail_reason_obj != nullptr)
+                {
+                    history_item.fail_reason = std::string(json_object_get_string(fail_reason_obj));
+                }
+
                 history_item.id = json_object_get_uint64(json_object_object_get(history_item_obj, "id"));
                 history_item.timestamp = json_object_get_uint64(json_object_object_get(history_item_obj, "timestamp"));
 
@@ -244,6 +255,10 @@ namespace CONFIG
                 json_object_object_add(history_item_obj, "file_size", json_object_new_uint64(it->file_size));
                 json_object_object_add(history_item_obj, "bytes_transfered", json_object_new_uint64(it->bytes_transfered));
                 json_object_object_add(history_item_obj, "state", json_object_new_int(it->state));
+                if (it->state == STATE_FAILED && !it->fail_reason.empty())
+                {
+                    json_object_object_add(history_item_obj, "fail_reason", json_object_new_string(it->fail_reason.c_str()));
+                }
                 json_object_object_add(history_item_obj, "id", json_object_new_uint64(it->id));
                 json_object_object_add(history_item_obj, "timestamp", json_object_new_uint64(it->timestamp));
 
@@ -253,5 +268,15 @@ namespace CONFIG
         
         json_object_to_file(BG_DOWNLOAD_HISTORY_PATH, history_list);
         json_object_put(history_list);
+    }
+
+    void LockDownloadList()
+    {
+        download_mutex_.lock();
+    }
+
+    void UnlockDownloadList()
+    {
+        download_mutex_.unlock();
     }
 }

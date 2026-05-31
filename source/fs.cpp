@@ -232,12 +232,15 @@ namespace FS
         while (size != 0)
         {
             int written = fwrite(data8, 1, size, fd);
-            fclose(fd);
             if (written <= 0)
+            {
+                fclose(fd);
                 return false;
+            }
             data8 += written;
             size -= written;
         }
+        fclose(fd);
         return true;
     }
 
@@ -411,6 +414,7 @@ namespace FS
         struct stat file_stat = {0};
         if (stat(from.c_str(), &file_stat) != 0)
         {
+            fclose(src);
             return false;
         }
 

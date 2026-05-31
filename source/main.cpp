@@ -11,6 +11,8 @@
 #include "server/http_server.h"
 #include "config.h"
 #include "util.h"
+#include "usecase/dpi_usecase.h"
+#include "server/legacy_dpi_server.h"
 //#include "dbglogger.h"
 
 int main(int argc, char *argv[])
@@ -20,8 +22,11 @@ int main(int argc, char *argv[])
 
     CONFIG::LoadPackageInstallHostData();
     CONFIG::LoadBgDownloadData();
+    DpiUseCase::Initialize();
+    LegacyDpiServer::Start();
     HttpServer::StartDownloadThread();
     HttpServer::Start();
+    LegacyDpiServer::Stop();
     Util::Notify("ezRemote Server stopped.");
 
     return 0;
