@@ -2,6 +2,7 @@
 #include <string.h>
 #include <strings.h>
 #include "sceAppInstUtil.h"
+#include "dbglogger.h"
 
 namespace DpiUseCase {
 
@@ -118,7 +119,18 @@ namespace DpiUseCase {
         metainfo.icon_url = safe_icon.c_str();
         metainfo.content_id = safe_id.c_str();
 
+        dbglogger_log("[DPI] ===== Sending Payload to sceAppInstUtilInstallByPackage =====");
+        dbglogger_log("[DPI] uri=%s", metainfo.uri);
+        dbglogger_log("[DPI] ex_uri=%s", metainfo.ex_uri);
+        dbglogger_log("[DPI] content_name=%s", metainfo.content_name);
+        dbglogger_log("[DPI] icon_url=%s", metainfo.icon_url);
+        dbglogger_log("[DPI] content_id=%s", metainfo.content_id);
+        dbglogger_log("[DPI] playgo_scenario_id=%s", metainfo.playgo_scenario_id);
+        dbglogger_log("[DPI] ===========================================================");
+
         int ret = sceAppInstUtilInstallByPackage(&metainfo, &pkg_info, &playgo_info);
+
+        dbglogger_log("[DPI] sceAppInstUtilInstallByPackage returned: 0x%08X", ret);
 
         return ret;
     }

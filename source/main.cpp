@@ -13,12 +13,12 @@
 #include "util.h"
 #include "usecase/dpi_usecase.h"
 #include "server/legacy_dpi_server.h"
-//#include "dbglogger.h"
+#include "dbglogger.h"
 
 int main(int argc, char *argv[])
 {
-	//dbglogger_init();
-	//dbglogger_log("If you see this you've set up dbglogger correctly.");
+	dbglogger_init_str("file:/data/homebrew/ezremote-client/server.log");
+	dbglogger_log("ezremote-server dbglogger started.");
 
     CONFIG::LoadPackageInstallHostData();
     CONFIG::LoadBgDownloadData();

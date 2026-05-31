@@ -313,18 +313,13 @@ void dbglogger_printf(const char* fmt, ...) {
         
         while (*p) {
             if (new_line) {
-#ifdef EZREMOTE_VERSION
-                const char* source = "server";
-#else
-                const char* source = "client";
-#endif
 #ifdef __PSP__
                 ScePspDateTime t;
                 sceRtcGetCurrentClockLocalTime(&t);
-                out_len += snprintf(out_p, sizeof(out_buffer) - out_len, "[%d-%02d-%02d %02d:%02d:%02d][%s] ", t.year, t.month, t.day, t.hour, t.minute, t.second, source);
+                out_len += snprintf(out_p, sizeof(out_buffer) - out_len, "[%d-%02d-%02d %02d:%02d:%02d] ", t.year, t.month, t.day, t.hour, t.minute, t.second);
 #else
                 struct tm t = *gmtime(&(time_t){time(NULL)});
-                out_len += snprintf(out_p, sizeof(out_buffer) - out_len, "[%d-%02d-%02d %02d:%02d:%02d][%s] ", t.tm_year+1900, t.tm_mon+1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, source);
+                out_len += snprintf(out_p, sizeof(out_buffer) - out_len, "[%d-%02d-%02d %02d:%02d:%02d] ", t.tm_year+1900, t.tm_mon+1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
 #endif
                 out_p = out_buffer + out_len;
                 new_line = 0;

@@ -48,6 +48,7 @@ struct PackageInstallData
     std::string path;
     uint64_t file_size;
     uint64_t timestamp;
+    std::string direct_url;
 };
 
 struct BgDownloadData {

@@ -101,6 +101,8 @@ namespace CONFIG
                 json_object *size_obj = json_object_object_get(history_item_obj, "size");
                 history_item.file_size = size_obj != nullptr ? json_object_get_uint64(size_obj) : 0;
                 history_item.timestamp = json_object_get_uint64(json_object_object_get(history_item_obj, "timestamp"));
+                json_object *direct_url_obj = json_object_object_get(history_item_obj, "direct_url");
+                history_item.direct_url = direct_url_obj != nullptr ? std::string(json_object_get_string(direct_url_obj)) : "";
                 history_item.host_info.client = nullptr;
 
                 if (history_item.host_info.type == CLIENT_TYPE_HTTP_SERVER)
@@ -143,6 +145,9 @@ namespace CONFIG
                 json_object_object_add(history_item_obj, "type", json_object_new_int(it->second.host_info.type));
                 json_object_object_add(history_item_obj, "size", json_object_new_uint64(it->second.file_size));
                 json_object_object_add(history_item_obj, "timestamp", json_object_new_uint64(it->second.timestamp));
+                if (!it->second.direct_url.empty()) {
+                    json_object_object_add(history_item_obj, "direct_url", json_object_new_string(it->second.direct_url.c_str()));
+                }
                 if (it->second.host_info.type == CLIENT_TYPE_HTTP_SERVER)
                 {
                     json_object_object_add(history_item_obj, "http_server_type", json_object_new_string(it->second.host_info.http_server_type.c_str()));

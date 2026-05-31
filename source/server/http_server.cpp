@@ -1,6 +1,9 @@
 #include <string>
 #include <cstdio>
 #include <atomic>
+#include <map>
+#include <fstream>
+#include <sstream>
 #include <json-c/json.h>
 #include "http/httplib.h"
 #include "server/http_server.h"
@@ -22,6 +25,8 @@
 #define FAILURE_MSG "{ \"result\": { \"success\": false, \"error\": \"%s\" } }"
 #define SUCCESS_MSG_LEN 48
 #define PKG_INITIAL_REQUEST_SIZE 8388608ul
+
+
 
 using namespace httplib;
 
@@ -411,6 +416,12 @@ namespace HttpServer
                 json_object *size_obj = json_object_object_get(jobj, "size");
                 size_param = size_obj != nullptr ? json_object_get_uint64(size_obj) : 0;
 
+                const char *direct_url_param = nullptr;
+                json_object *direct_url_obj = json_object_object_get(jobj, "direct_url");
+                if (direct_url_obj != nullptr) {
+                    direct_url_param = json_object_get_string(direct_url_obj);
+                }
+
                 if (url_param == nullptr || hash_param == nullptr)
                 {
                     bad_request(res, "Required url_param or hash parameter missing");
@@ -428,6 +439,8 @@ namespace HttpServer
                     pkg_data.path = path_param;
                 if (http_server_type_param != nullptr)
                     pkg_data.host_info.http_server_type = http_server_type_param;
+                if (direct_url_param != nullptr)
+                    pkg_data.direct_url = direct_url_param;
                 pkg_data.file_size = size_param;
                 pkg_data.timestamp = Util::GetTick();
                 pkg_data.host_info.type = type_param;
@@ -441,6 +454,18 @@ namespace HttpServer
             else
             {
                 bad_request(res, "Invalid payload");
+            }
+        });
+
+        svr->Get("/bg_redirect/(.*)", [&](const Request &req, Response &res)
+        {
+            std::string hash = req.matches[1];
+            PackageInstallData* pkg_host_data = CONFIG::GetPackageInstallHostData(hash);
+            
+            if (pkg_host_data != nullptr && !pkg_host_data->direct_url.empty()) {
+                res.set_redirect(pkg_host_data->direct_url.c_str());
+            } else {
+                failed(res, 404, "Redirect not found");
             }
         });
 
