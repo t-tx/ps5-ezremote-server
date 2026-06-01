@@ -7,6 +7,8 @@
 #include <vector>
 #include <cstdint>
 
+#include "common.h"
+
 #define MAX_PATH_LENGTH 1024
 
 namespace FS
@@ -56,6 +58,7 @@ namespace FS
     bool Save(const std::string &path, const void *data, uint32_t size);
 
     std::vector<std::string> ListFiles(const std::string &path);
+    std::vector<DirEntry> ListDir(const std::string &path, int *err);
 
     int hasEndSlash(const char *path);
 

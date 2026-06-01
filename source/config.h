@@ -9,16 +9,21 @@
 #include <map>
 #include <set>
 
-#include "clients/remote_client.h"
-
-#define APP_ID "ezremote-client"
-#define DATA_PATH "/data/homebrew/" APP_ID
+#define FILEHOST_DB_PATH "/data/homebrew/ezremote-client/filehost.db"
+#define BACKGROUND_QUEUE_PATH "/data/homebrew/ezremote-client/background.queue"
+#define CONFIG_PATH "/data/homebrew/ezremote-client/config.json"
+#define DATA_PATH "/data/homebrew/ezremote-client"
+#define TMP_SFO_PATH DATA_PATH "/tmp_pkg.sfo"
 #define PKG_INSTALL_HISTORY_PATH DATA_PATH "/pkg_install_history.json"
 #define BG_DOWNLOAD_HISTORY_PATH DATA_PATH "/bg_download_history.json"
 #define DEBUG_SERVER_LOG_PATH DATA_PATH "/ezremote_server.log"
 #define NOTIFY_ICON_FILE "/user" DATA_PATH "/sce_sys/icon0.png"
 #define CLIENT_ELF_PATH DATA_PATH "/ezremote_client.elf"
+#define SERVER_ELF_PATH DATA_PATH "/ezremote-server.elf"
 
+#include "clients/remote_client.h"
+
+#define APP_ID "ezremote-client"
 #define HTTP_SERVER_APACHE "Apache"
 #define HTTP_SERVER_MS_IIS "Microsoft IIS"
 #define HTTP_SERVER_NGINX "Nginx"
@@ -30,7 +35,7 @@
 
 #define MAX_PKG_HISTORY_RETENTION 1209600000000L
 
-enum DownloadState { STATE_PENDING, STATE_DOWNLOADING, STATE_RESUMED, STATE_FAILED, STATE_SUCCESS };
+
 
 struct HostInfo
 {
@@ -64,6 +69,37 @@ struct BgDownloadData {
 };
 
 extern uint64_t *g_bytes_transfered;
+extern char working_dir[256];
+extern char internal_server_ip[64];
+extern char internal_server_port[64];
+extern char server_ip[64];
+extern char server_port[64];
+#include "clients/remote_client.h"
+
+struct RemoteSettings
+{
+    char site_name[32];
+    char server[256];
+    char username[33];
+    char password[128];
+    ClientType type;
+    bool enable_rpi;
+    uint32_t supported_actions;
+    char http_server_type[24];
+    char default_directory[256];
+};
+
+class RemoteClient;
+
+extern RemoteSettings *remote_settings;
+extern RemoteClient *remoteclient;
+extern bool enable_direct_download_redirect;
+extern int http_int_server_port;
+
+extern char alldebrid_api_key[64];
+extern char realdebrid_api_key[64];
+extern char CACERT_FILE[256];
+extern bool show_hidden_files;
 extern std::list<BgDownloadData> bg_download_list;
 
 namespace CONFIG
@@ -80,3 +116,5 @@ namespace CONFIG
     void UnlockDownloadList();
 }
 #endif
+extern int sites[256];
+extern RemoteSettings site_settings[256];

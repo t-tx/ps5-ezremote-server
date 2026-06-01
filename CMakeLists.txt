@@ -3,13 +3,16 @@ cmake_minimum_required(VERSION 3.5)
 project(ezremote-server)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -Wno-keyword-macro -fPIC -fPIE -march=znver2 -Wall -fstack-protector-all")
-set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -gdwarf-2 -O0 -pedantic -pedantic-errors")
+set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -fpermissive")
 
 set(APP_VERSION "1.04")
 
 include_directories(
   source
+  source/ps5_api
+  source/wrapper
   source/pugixml
+  source/ui_dummy
 )
 
 add_executable(${PROJECT_NAME}.elf
@@ -22,10 +25,32 @@ add_executable(${PROJECT_NAME}.elf
   source/clients/nfsclient.cpp
   source/clients/smbclient.cpp
   source/clients/webdav.cpp
+  source/clients/apache.cpp
+  source/clients/github.cpp
+  source/clients/myrient.cpp
+  source/clients/iis.cpp
+  source/clients/nginx.cpp
+  source/clients/npxserve.cpp
+  source/clients/rclone.cpp
+  source/filehost/1fichier.cpp
+  source/filehost/alldebrid.cpp
+  source/filehost/directhost.cpp
+  source/filehost/filehost.cpp
+  source/filehost/gdrive.cpp
+  source/filehost/mediafire.cpp
+  source/filehost/pixeldrain.cpp
+  source/filehost/realdebrid.cpp
   source/config.cpp
   source/crypt.c
   source/dbglogger.c
-  source/fs.cpp
+  source/ps5_api/fs.cpp
+  source/ps5_api/installer_api.cpp
+  source/pugixml/pugixml.cpp
+  source/wrapper/sfo.cpp
+  source/wrapper/split_file.cpp
+  source/wrapper/installer.cpp
+  source/wrapper/zip_util.cpp
+  source/ui_dummy/ui_dummy.cpp
   source/main.cpp
   source/server/legacy_dpi_server.cpp
   source/usecase/dpi_usecase.cpp
@@ -45,6 +70,14 @@ target_link_libraries(${PROJECT_NAME}.elf
   smb2
   ssh2
   nfs
+  iconv
+  charset
+  archive
+  minizip
+  bz2
+  lzma
+  xml2
+  lexbor_static
   SceNotification
   SceSystemService
   SceUserService

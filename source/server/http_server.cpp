@@ -1,9 +1,20 @@
 #include <string>
 #include <cstdio>
+#include <cerrno>
+#include <cstddef>
+#include <cstring>
 #include <atomic>
 #include <map>
+#include <mutex>
+#include <vector>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
+#include <sys/resource.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#include <sys/user.h>
+#include <unistd.h>
 #include <json-c/json.h>
 #include "http/httplib.h"
 #include "server/http_server.h"
@@ -16,7 +27,7 @@
 #include "clients/sftpclient.h"
 #include "clients/webdav.h"
 #include "config.h"
-#include "fs.h"
+#include "ps5_api/fs.h"
 #include "util.h"
 #include "usecase/dpi_usecase.h"
 #include "dbglogger.h"
@@ -245,6 +256,203 @@ namespace HttpServer
             return false;
 
         return std::rename(temp_file, dest_path.c_str()) == 0;
+    }
+
+    struct ProcessMemoryStats
+    {
+        pid_t pid;
+        long page_size;
+        bool has_current;
+        bool has_peak;
+        uint64_t rss_bytes;
+        uint64_t virtual_bytes;
+        uint64_t text_bytes;
+        uint64_t data_bytes;
+        uint64_t stack_bytes;
+        long peak_rss_kb;
+        uint64_t peak_rss_bytes;
+        int current_errno;
+        size_t kern_proc_pid_size;
+        const char *current_source;
+        bool has_cpu;
+        bool has_cpu_percent;
+        uint64_t user_cpu_us;
+        uint64_t system_cpu_us;
+        uint64_t total_cpu_us;
+        uint64_t cpu_delta_us;
+        uint64_t cpu_sample_interval_us;
+        double cpu_percent_since_last_sample;
+    };
+
+    static std::mutex cpu_stats_mutex;
+    static uint64_t previous_cpu_total_us = 0;
+    static uint64_t previous_cpu_wall_us = 0;
+
+    static uint64_t TimevalToMicros(const struct timeval &value)
+    {
+        return (static_cast<uint64_t>(value.tv_sec) * 1000000ULL) + static_cast<uint64_t>(value.tv_usec);
+    }
+
+    static double BytesToMiB(uint64_t bytes)
+    {
+        return static_cast<double>(bytes) / 1048576.0;
+    }
+
+    static double MicrosToSeconds(uint64_t micros)
+    {
+        return static_cast<double>(micros) / 1000000.0;
+    }
+
+    static void UpdateCpuPercent(ProcessMemoryStats &stats)
+    {
+        uint64_t now_us = Util::GetTick();
+        std::lock_guard<std::mutex> lock(cpu_stats_mutex);
+
+        if (previous_cpu_wall_us > 0 && now_us > previous_cpu_wall_us && stats.total_cpu_us >= previous_cpu_total_us)
+        {
+            stats.cpu_delta_us = stats.total_cpu_us - previous_cpu_total_us;
+            stats.cpu_sample_interval_us = now_us - previous_cpu_wall_us;
+            stats.cpu_percent_since_last_sample = (static_cast<double>(stats.cpu_delta_us) * 100.0) / static_cast<double>(stats.cpu_sample_interval_us);
+            stats.has_cpu_percent = true;
+        }
+
+        previous_cpu_total_us = stats.total_cpu_us;
+        previous_cpu_wall_us = now_us;
+    }
+
+    static bool ApplyProcessMemoryStats(ProcessMemoryStats &stats, const struct kinfo_proc *proc, size_t proc_size, const char *source)
+    {
+        size_t min_proc_size = offsetof(struct kinfo_proc, ki_ssize) + sizeof(proc->ki_ssize);
+        if (proc == nullptr || proc_size < min_proc_size || proc->ki_pid != stats.pid)
+            return false;
+
+        uint64_t page_size = static_cast<uint64_t>(stats.page_size);
+        stats.has_current = true;
+        stats.rss_bytes = static_cast<uint64_t>(proc->ki_rssize) * page_size;
+        stats.virtual_bytes = static_cast<uint64_t>(proc->ki_size);
+        stats.text_bytes = static_cast<uint64_t>(proc->ki_tsize) * page_size;
+        stats.data_bytes = static_cast<uint64_t>(proc->ki_dsize) * page_size;
+        stats.stack_bytes = static_cast<uint64_t>(proc->ki_ssize) * page_size;
+        stats.current_source = source;
+        return true;
+    }
+
+    static bool GetCurrentProcessMemoryFromProcessList(ProcessMemoryStats &stats)
+    {
+        int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0};
+        size_t buf_size = 0;
+        if (sysctl(mib, 4, nullptr, &buf_size, nullptr, 0) != 0 || buf_size == 0)
+        {
+            stats.current_errno = errno;
+            return false;
+        }
+
+        std::vector<unsigned char> buf(buf_size);
+        if (sysctl(mib, 4, buf.data(), &buf_size, nullptr, 0) != 0)
+        {
+            stats.current_errno = errno;
+            return false;
+        }
+
+        for (size_t offset = 0; offset + sizeof(int) <= buf_size;)
+        {
+            struct kinfo_proc *proc = reinterpret_cast<struct kinfo_proc *>(buf.data() + offset);
+            if (proc->ki_structsize <= 0 || offset + static_cast<size_t>(proc->ki_structsize) > buf_size)
+                break;
+
+            if (ApplyProcessMemoryStats(stats, proc, static_cast<size_t>(proc->ki_structsize), "kern_proc_proc"))
+                return true;
+
+            offset += static_cast<size_t>(proc->ki_structsize);
+        }
+
+        return false;
+    }
+
+    static ProcessMemoryStats GetProcessMemoryStats()
+    {
+        ProcessMemoryStats stats = {};
+        stats.pid = getpid();
+        stats.page_size = getpagesize();
+        stats.current_source = "unavailable";
+        if (stats.page_size <= 0)
+            stats.page_size = 4096;
+
+        struct rusage usage;
+        if (getrusage(RUSAGE_SELF, &usage) == 0)
+        {
+            stats.has_peak = true;
+            stats.peak_rss_kb = usage.ru_maxrss;
+            stats.peak_rss_bytes = static_cast<uint64_t>(usage.ru_maxrss) * 1024ULL;
+            stats.has_cpu = true;
+            stats.user_cpu_us = TimevalToMicros(usage.ru_utime);
+            stats.system_cpu_us = TimevalToMicros(usage.ru_stime);
+            stats.total_cpu_us = stats.user_cpu_us + stats.system_cpu_us;
+            UpdateCpuPercent(stats);
+        }
+
+        struct kinfo_proc proc;
+        memset(&proc, 0, sizeof(proc));
+        size_t proc_size = sizeof(proc);
+        int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, stats.pid};
+        if (sysctl(mib, 4, &proc, &proc_size, nullptr, 0) == 0)
+        {
+            stats.kern_proc_pid_size = proc_size;
+            ApplyProcessMemoryStats(stats, &proc, proc_size, "kern_proc_pid");
+        }
+        else
+        {
+            stats.current_errno = errno;
+        }
+
+        if (!stats.has_current)
+            GetCurrentProcessMemoryFromProcessList(stats);
+
+        return stats;
+    }
+
+    static std::string ProcessMemoryStatsJson()
+    {
+        ProcessMemoryStats stats = GetProcessMemoryStats();
+        std::ostringstream payload;
+        payload << std::fixed << std::setprecision(2)
+                << "{"
+                << "\"mem\":{"
+                << "\"rss_mib\":" << BytesToMiB(stats.rss_bytes) << ","
+                << "\"peak_rss_mib\":" << BytesToMiB(stats.peak_rss_bytes) << ","
+                << "\"virtual_mib\":" << BytesToMiB(stats.virtual_bytes) << ","
+                << "\"data_mib\":" << BytesToMiB(stats.data_bytes) << ","
+                << "\"stack_mib\":" << BytesToMiB(stats.stack_bytes) << ","
+                << "\"has_current\":" << (stats.has_current ? "true" : "false") << ","
+                << "\"source\":\"" << stats.current_source << "\","
+                << "\"rss_bytes\":" << stats.rss_bytes << ","
+                << "\"virtual_bytes\":" << stats.virtual_bytes << ","
+                << "\"text_bytes\":" << stats.text_bytes << ","
+                << "\"data_bytes\":" << stats.data_bytes << ","
+                << "\"stack_bytes\":" << stats.stack_bytes << ","
+                << "\"has_peak\":" << (stats.has_peak ? "true" : "false") << ","
+                << "\"peak_rss_kb\":" << stats.peak_rss_kb << ","
+                << "\"peak_rss_bytes\":" << stats.peak_rss_bytes << ","
+                << "\"page_size\":" << stats.page_size << ","
+                << "\"current_errno\":" << stats.current_errno << ","
+                << "\"kern_proc_pid_size\":" << stats.kern_proc_pid_size
+                << "},"
+                << "\"cpu\":{"
+                << "\"percent\":" << stats.cpu_percent_since_last_sample << ","
+                << "\"has_percent\":" << (stats.has_cpu_percent ? "true" : "false") << ","
+                << "\"total_seconds\":" << MicrosToSeconds(stats.total_cpu_us) << ","
+                << "\"user_seconds\":" << MicrosToSeconds(stats.user_cpu_us) << ","
+                << "\"system_seconds\":" << MicrosToSeconds(stats.system_cpu_us) << ","
+                << "\"has_cpu\":" << (stats.has_cpu ? "true" : "false") << ","
+                << "\"total_us\":" << stats.total_cpu_us << ","
+                << "\"user_us\":" << stats.user_cpu_us << ","
+                << "\"system_us\":" << stats.system_cpu_us << ","
+                << "\"delta_us\":" << stats.cpu_delta_us << ","
+                << "\"sample_interval_us\":" << stats.cpu_sample_interval_us << ","
+                << "\"pid\":" << static_cast<int>(stats.pid)
+                << "}"
+                << "}";
+        return payload.str();
     }
 
     void *DownloadFilesThread(void *argp)
@@ -683,9 +891,17 @@ namespace HttpServer
         svr->Get("/version", [&](const Request & req, Response &res)
         {
             res.status = 200;
+            res.set_header("Access-Control-Allow-Origin", "*");
             char version[20];
             sprintf(version, "%.2f", EZREMOTE_VERSION);
             res.set_content(version, "text/html");
+        });
+
+        svr->Get("/mem", [&](const Request & req, Response &res)
+        {
+            res.status = 200;
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_content(ProcessMemoryStatsJson(), "application/json");
         });
 
         svr->set_error_handler([](const Request & /*req*/, Response &res)
@@ -721,12 +937,18 @@ namespace HttpServer
             svr = new Server();
         if (!svr->is_valid())
         {
+            StopDownloadThread();
+            delete svr;
+            svr = nullptr;
             return;
         }
 
         Util::Notify("Starting ezRemote Server %.2f on port %d", EZREMOTE_VERSION, http_server_port);
         ServerThread(nullptr);
         StopDownloadThread();
+
+        delete svr;
+        svr = nullptr;
     }
 
     void Stop()

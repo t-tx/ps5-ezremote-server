@@ -12,10 +12,8 @@
 #include <vector>
 #include <sys/stat.h>
 #include "util.h"
-
-#if defined(EZREMOTE_ENABLE_UI)
+#include "lang.h"
 #include "windows.h"
-#endif
 
 namespace FS
 {
@@ -96,14 +94,13 @@ namespace FS
 
     FILE *Create(const std::string &path)
     {
-        FILE *fd = fopen(path.c_str(), "w");
-
+        FILE *fd = fopen(path.c_str(), "wb");
         return fd;
     }
 
     FILE *OpenRW(const std::string &path)
     {
-        FILE *fd = fopen(path.c_str(), "w+");
+        FILE *fd = fopen(path.c_str(), "wb+");
         return fd;
     }
 
@@ -244,6 +241,192 @@ namespace FS
         return true;
     }
 
+    std::vector<DirEntry> ListDir(const std::string &ppath, int *err)
+    {
+        std::vector<DirEntry> out;
+        std::string path = ppath;
+
+        if (path == "/")
+        {
+            *err = 0;
+
+            auto check_and_add = [&](const char* full_path, const char* display_name) {
+                DIR *sub_fd = opendir(full_path);
+                if (sub_fd != NULL)
+                {
+                    bool is_empty = true;
+                    struct dirent *sub_dir;
+                    while ((sub_dir = readdir(sub_fd)) != NULL)
+                    {
+                        if (strcmp(sub_dir->d_name, ".") != 0 && strcmp(sub_dir->d_name, "..") != 0)
+                        {
+                            is_empty = false;
+                            break;
+                        }
+                    }
+                    closedir(sub_fd);
+
+                    if (!is_empty)
+                    {
+                        DirEntry entry_mnt;
+                        memset(&entry_mnt, 0, sizeof(DirEntry));
+                        sprintf(entry_mnt.directory, "/");
+                        sprintf(entry_mnt.name, "%s", display_name);
+                        sprintf(entry_mnt.display_size, "%s", lang_strings[STR_FOLDER]);
+                        sprintf(entry_mnt.path, "%s", full_path);
+                        entry_mnt.file_size = 0;
+                        entry_mnt.isDir = true;
+                        entry_mnt.selectable = true;
+                        out.push_back(entry_mnt);
+                    }
+                }
+            };
+
+            check_and_add("/data", "data");
+            check_and_add("/data/etahen", "data/etahen");
+            check_and_add("/data/etaHEN", "data/etaHEN");
+            check_and_add("/data/homebrew", "data/homebrew");
+
+            // Add non-empty /mnt/*
+            DIR *mnt_fd = opendir("/mnt");
+            if (mnt_fd != NULL)
+            {
+                struct dirent *mnt_dir;
+                while ((mnt_dir = readdir(mnt_fd)) != NULL)
+                {
+                    if (strcmp(mnt_dir->d_name, ".") == 0 || strcmp(mnt_dir->d_name, "..") == 0)
+                        continue;
+
+                    if (strncmp(mnt_dir->d_name, "ext", 3) != 0 && strncmp(mnt_dir->d_name, "usb", 3) != 0)
+                        continue;
+
+                    std::string mnt_path = std::string("/mnt/") + mnt_dir->d_name;
+                    check_and_add(mnt_path.c_str(), mnt_path.c_str() + 1);
+                }
+                closedir(mnt_fd);
+            }
+            return out;
+        }
+
+        DirEntry entry;
+        memset(&entry, 0, sizeof(DirEntry));
+        sprintf(entry.directory, "%s", path.c_str());
+        sprintf(entry.name, "..");
+        sprintf(entry.display_size, "%s", lang_strings[STR_FOLDER]);
+        sprintf(entry.path, "%s", path.c_str());
+        entry.file_size = 0;
+        entry.isDir = true;
+        entry.selectable = false;
+        out.push_back(entry);
+
+        DIR *fd = opendir(path.c_str());
+        *err = 0;
+        if (fd == NULL)
+        {
+            *err = 1;
+            return out;
+        }
+
+        while (true)
+        {
+            struct dirent *dirent;
+            DirEntry entry;
+            dirent = readdir(fd);
+            if (dirent == NULL)
+            {
+                closedir(fd);
+                fd = NULL;
+                return out;
+            }
+            else
+            {
+                if (strcmp(dirent->d_name, ".") == 0 || strcmp(dirent->d_name, "..") == 0)
+                {
+                    continue;
+                }
+
+                if (path == "/mnt")
+                {
+                    if (strncmp(dirent->d_name, "ext", 3) != 0 && strncmp(dirent->d_name, "usb", 3) != 0)
+                        continue;
+
+                    std::string mnt_path = std::string("/mnt/") + dirent->d_name;
+                    DIR *sub_fd = opendir(mnt_path.c_str());
+                    bool is_empty = true;
+                    if (sub_fd != NULL) {
+                        struct dirent *sub_dir;
+                        while ((sub_dir = readdir(sub_fd)) != NULL) {
+                            if (strcmp(sub_dir->d_name, ".") != 0 && strcmp(sub_dir->d_name, "..") != 0) {
+                                is_empty = false;
+                                break;
+                            }
+                        }
+                        closedir(sub_fd);
+                    }
+                    if (is_empty)
+                        continue;
+                }
+
+                snprintf(entry.directory, 512, "%s", path.c_str());
+                snprintf(entry.name, 256, "%s", dirent->d_name);
+                entry.selectable = true;
+
+                if (hasEndSlash(path.c_str()))
+                {
+                    sprintf(entry.path, "%s%s", path.c_str(), dirent->d_name);
+                }
+                else
+                {
+                    sprintf(entry.path, "%s/%s", path.c_str(), dirent->d_name);
+                }
+                struct stat file_stat = {0};
+                stat(entry.path, &file_stat);
+                struct tm tm = *localtime(&file_stat.st_mtime);
+
+
+                entry.modified.day = tm.tm_mday;
+                entry.modified.month = tm.tm_mon + 1;
+                entry.modified.year = tm.tm_year + 1900;
+                entry.modified.hours = tm.tm_hour;
+                entry.modified.minutes = tm.tm_min;
+                entry.modified.seconds = tm.tm_sec;
+                entry.file_size = file_stat.st_size;
+               
+                if (dirent->d_type & DT_DIR)
+                {
+                    entry.isDir = true;
+                    entry.file_size = 0;
+                    sprintf(entry.display_size, "%s", lang_strings[STR_FOLDER]);
+                }
+                else
+                {
+                    if (entry.file_size < 1024)
+                    {
+                        sprintf(entry.display_size, "%luB", entry.file_size);
+                    }
+                    else if (entry.file_size < 1024 * 1024)
+                    {
+                        sprintf(entry.display_size, "%.2fKB", entry.file_size * 1.0f / 1024);
+                    }
+                    else if (entry.file_size < 1024 * 1024 * 1024)
+                    {
+                        sprintf(entry.display_size, "%.2fMB", entry.file_size * 1.0f / (1024 * 1024));
+                    }
+                    else
+                    {
+                        sprintf(entry.display_size, "%.2fGB", entry.file_size * 1.0f / (1024 * 1024 * 1024));
+                    }
+                    entry.isDir = false;
+                }
+                out.push_back(entry);
+            }
+        }
+        closedir(fd);
+        fd = NULL;
+
+        return out;
+    }
+
     std::vector<std::string> ListFiles(const std::string &path)
     {
         DIR *fd = opendir(path.c_str());
@@ -286,12 +469,8 @@ namespace FS
 
     int RmRecursive(const std::string &path)
     {
-    #if defined(EZREMOTE_ENABLE_UI)
         if (stop_activity)
             return 1;
-    #else
-        bool stop_activity = false;
-    #endif
 
         DIR *dfd = opendir(path.c_str());
         if (dfd != NULL)
@@ -313,24 +492,18 @@ namespace FS
                     int ret = RmRecursive(new_path);
                     if (ret <= 0)
                     {
-                    #if defined(EZREMOTE_ENABLE_UI)
                         sprintf(status_message, "%s %s", lang_strings[STR_FAIL_DEL_DIR_MSG], new_path);
-                    #endif
                         closedir(dfd);
                         return ret;
                     }
                 }
                 else
                 {
-                #if defined(EZREMOTE_ENABLE_UI)
                     snprintf(activity_message, 1024, "%s %s", lang_strings[STR_DELETING], new_path);
-                #endif
                     int ret = remove(new_path);
                     if (ret < 0)
                     {
-                    #if defined(EZREMOTE_ENABLE_UI)
                         sprintf(status_message, "%s %s", lang_strings[STR_FAIL_DEL_FILE_MSG], new_path);
-                    #endif
                         closedir(dfd);
                         return ret;
                     }
@@ -345,28 +518,20 @@ namespace FS
             int ret = rmdir(path.c_str());
             if (ret < 0)
             {
-            #if defined(EZREMOTE_ENABLE_UI)
                 sprintf(status_message, "%s %s", lang_strings[STR_FAIL_DEL_DIR_MSG], path.c_str());
-            #endif
                 return ret;
             }
-        #if defined(EZREMOTE_ENABLE_UI)
             snprintf(activity_message, 1024, "%s %s", lang_strings[STR_DELETED], path.c_str());
-        #endif
         }
         else
         {
             int ret = remove(path.c_str());
             if (ret < 0)
             {
-            #if defined(EZREMOTE_ENABLE_UI)
                 sprintf(status_message, "%s %s", lang_strings[STR_FAIL_DEL_FILE_MSG], path.c_str());
-            #endif
                 return ret;
             }
-        #if defined(EZREMOTE_ENABLE_UI)
             snprintf(activity_message, 1024, "%s %s", lang_strings[STR_DELETED], path.c_str());
-        #endif
         }
 
         return 1;
@@ -397,10 +562,6 @@ namespace FS
 
     bool Copy(const std::string &from, const std::string &to)
     {
-    #if !defined(EZREMOTE_ENABLE_UI)
-        uint64_t bytes_to_download;
-        uint64_t bytes_transfered;
-    #endif
         MkDirs(to, true);
         if (from.compare(to) == 0)
             return true;
@@ -429,9 +590,7 @@ namespace FS
 
         size_t bytes_read = 0;
         bytes_transfered = 0;
-    #if defined(EZREMOTE_ENABLE_UI)
         prev_tick = Util::GetTick();
-    #endif
         const size_t buf_size = 0x10000;
         unsigned char *buf = new unsigned char[buf_size];
 

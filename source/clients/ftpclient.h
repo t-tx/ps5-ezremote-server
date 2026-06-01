@@ -66,7 +66,7 @@ public:
 
 	FtpClient();
 	~FtpClient();
-	int Connect(const std::string &url, const std::string &user, const std::string &pass);
+	int Connect(const std::string &url, const std::string &user, const std::string &pass, bool send_ping=false);
 	void SetConnmode(connmode mode);
 	int Site(const std::string &cmd);
 	int Raw(const std::string &cmd);
@@ -75,8 +75,10 @@ public:
 	int Chdir(const std::string &path);
 	int Cdup();
 	int Rmdir(const std::string &path);
+	int Rmdir(const std::string &path, bool recursive);
 	int Size(const std::string &path, uint64_t *size);
 	int Get(const std::string &outputfile, const std::string &path, uint64_t offset = 0);
+	int Get(SplitFile *split_file, const std::string &path, uint64_t offset=0);
 	int GetRange(const std::string &path, void *buffer, uint64_t size, uint64_t offset);
 	int GetRange(const std::string &path, DataSink &sink, uint64_t size, uint64_t offset);
 	int GetRange(void *fp, void *buffer, uint64_t size, uint64_t offset);
@@ -84,9 +86,12 @@ public:
 	int Put(const std::string &inputfile, const std::string &path, uint64_t offset = 0);
 	int Rename(const std::string &src, const std::string &dst);
 	int Delete(const std::string &path);
+    int Copy(const std::string &from, const std::string &to);
+    int Move(const std::string &from, const std::string &to);
 	int Head(const std::string &path, void *buffer, uint64_t len);
     void *Open(const std::string &path, int flags);
     void Close(void *fp);
+	std::vector<DirEntry> ListDir(const std::string &path);
 	void SetCallbackXferFunction(FtpCallbackXfer pointer);
 	void SetCallbackArg(void *arg);
 	void SetCallbackBytes(int64_t bytes);
@@ -97,6 +102,9 @@ public:
 	char *LastResponse();
 	long GetIdleTime();
 	int Quit();
+	std::string GetPath(std::string path1, std::string path2);
+	ClientType clientType();
+	uint32_t SupportedActions();
 
 private:
 	ftphandle *mp_ftphandle;
@@ -120,9 +128,12 @@ private:
 	int CorrectPasvResponse(int *v);
 	int FtpAccess(const std::string &path, accesstype type, transfermode mode, ftphandle *nControl, ftphandle **nData);
 	int FtpXfer(const std::string &localfile, const std::string &path, ftphandle *nControl, accesstype type, transfermode mode);
+	int FtpXfer(SplitFile *split_file, const std::string &path, ftphandle *nControl, accesstype type, transfermode mode);
 	int FtpWrite(void *buf, int len, ftphandle *nData);
 	int FtpRead(void *buf, int max, ftphandle *nData);
 	int FtpClose(ftphandle *nData);
+	int ParseDirEntry(char *line, DirEntry *dirEntry);
+	int ParseMLSDDirEntry(char *line, DirEntry *dirEntry);
 };
 
 #endif

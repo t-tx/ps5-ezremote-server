@@ -1,7 +1,7 @@
 #include "dpi_usecase.h"
 #include <string.h>
 #include <strings.h>
-#include "sceAppInstUtil.h"
+#include "ps5_api/sceAppInstUtil.h"
 #include "dbglogger.h"
 
 namespace DpiUseCase {

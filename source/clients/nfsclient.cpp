@@ -10,10 +10,12 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include <errno.h>
-#include "sceSystemService.h"
 #include "clients/nfsclient.h"
 #include "config.h"
 #include "fs.h"
+#include "lang.h"
+#include "windows.h"
+#include "util.h"
 
 #define BUF_SIZE 1048576
 
@@ -28,12 +30,12 @@ NfsClient::~NfsClient()
 		Quit();
 }
 
-int NfsClient::Connect(const std::string &url, const std::string &user, const std::string &pass)
+int NfsClient::Connect(const std::string &url, const std::string &user, const std::string &pass, bool send_ping)
 {
 	nfs = nfs_init_context();
 	if (nfs == nullptr)
 	{
-		sprintf(response, "%s", "Failed to init nfs context");
+		sprintf(response, "%s", lang_strings[STR_FAIL_INIT_NFS_CONTEXT]);
 		return 0;
 	}
 
@@ -69,6 +71,21 @@ const char *NfsClient::LastResponse()
 	return (const char *)response;
 }
 
+/*
+ * IsConnected - return true if connected to remote
+ */
+bool NfsClient::IsConnected()
+{
+	return connected;
+}
+
+/*
+ * Ping - return true if connected to remote
+ */
+bool NfsClient::Ping()
+{
+	return connected;
+}
 
 /*
  * Quit - disconnect from remote
@@ -88,6 +105,87 @@ int NfsClient::Quit()
 }
 
 /*
+ * Mkdir - create a directory at server
+ *
+ * return 1 if successful, 0 otherwise
+ */
+int NfsClient::Mkdir(const std::string &ppath)
+{
+	int ret = nfs_mkdir(nfs, ppath.c_str());
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return 0;
+	}
+	return 1;
+}
+
+/*
+ * Rmdir - remove directory and all files under directory at remote
+ *
+ * return 1 if successful, 0 otherwise
+ */
+int NfsClient::_Rmdir(const std::string &ppath)
+{
+	int ret = nfs_rmdir(nfs, ppath.c_str());
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return 0;
+	}
+	return 1;
+}
+
+/*
+ * Rmdir - remove directory and all files under directory at remote
+ *
+ * return 1 if successful, 0 otherwise
+ */
+int NfsClient::Rmdir(const std::string &path, bool recursive)
+{
+	if (stop_activity)
+		return 1;
+
+	std::vector<DirEntry> list = ListDir(path);
+	int ret;
+	for (int i = 0; i < list.size(); i++)
+	{
+		if (stop_activity)
+			return 1;
+
+		if (list[i].isDir && recursive)
+		{
+			if (strcmp(list[i].name, "..") == 0)
+				continue;
+			ret = Rmdir(list[i].path, recursive);
+			if (ret == 0)
+			{
+				sprintf(status_message, "%s %s", lang_strings[STR_FAIL_DEL_DIR_MSG], list[i].path);
+				return 0;
+			}
+		}
+		else
+		{
+			sprintf(activity_message, "%s %s\n", lang_strings[STR_DELETING], list[i].path);
+			ret = Delete(list[i].path);
+			if (ret == 0)
+			{
+				sprintf(status_message, "%s %s", lang_strings[STR_FAIL_DEL_FILE_MSG], list[i].path);
+				return 0;
+			}
+		}
+	}
+	ret = _Rmdir(path);
+	if (ret == 0)
+	{
+		sprintf(status_message, "%s %s", lang_strings[STR_FAIL_DEL_DIR_MSG], path.c_str());
+		return 0;
+	}
+
+	return 1;
+}
+
+/*
  * Get - issue a GET command and write received data to output
  *
  * return 1 if successful, 0 otherwise
@@ -95,6 +193,12 @@ int NfsClient::Quit()
 
 int NfsClient::Get(const std::string &outputfile, const std::string &ppath, uint64_t offset)
 {
+	if (!Size(ppath.c_str(), &bytes_to_download))
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return 0;
+	}
+
 	struct nfsfh *nfsfh = nullptr;
 	int ret = nfs_open(nfs, ppath.c_str(), 0400, &nfsfh);
 	if (ret != 0)
@@ -103,20 +207,10 @@ int NfsClient::Get(const std::string &outputfile, const std::string &ppath, uint
 		return 0;
 	}
 
-	FILE* out = NULL;
-	if (offset > 0)
-	{
-		out = FS::Append(outputfile);
-	}
-	else
-	{
-		out = FS::Create(outputfile);
-	}
-
-
+	FILE* out = FS::Create(outputfile);
 	if (out == NULL)
 	{
-		// sprintf(response, "%s", lang_strings[STR_FAILED]);
+		sprintf(response, "%s", lang_strings[STR_FAILED]);
 		nfs_close(nfs, nfsfh);
 		return 0;
 	}
@@ -129,12 +223,8 @@ int NfsClient::Get(const std::string &outputfile, const std::string &ppath, uint
 		return 0;
 	}
 	int count = 0;
-	*g_bytes_transfered = offset;
-	if (offset > 0)
-	{
-		nfs_lseek(nfs, nfsfh, offset, SEEK_SET, NULL);
-	}
-
+	bytes_transfered = 0;
+	prev_tick = Util::GetTick();
 	while ((count = nfs_read(nfs, nfsfh, BUF_SIZE, buff)) != 0)
 	{
 		if (count < 0)
@@ -146,10 +236,8 @@ int NfsClient::Get(const std::string &outputfile, const std::string &ppath, uint
 			return 0;
 		}
 		FS::Write(out, buff, count);
-		*g_bytes_transfered += count;
-		sceSystemServicePowerTick();
+		bytes_transfered += count;
 	}
-
 	FS::Close(out);
 	nfs_close(nfs, nfsfh);
 	free((void*)buff);
@@ -157,7 +245,45 @@ int NfsClient::Get(const std::string &outputfile, const std::string &ppath, uint
 	return 1;
 }
 
+int NfsClient::Get(SplitFile *split_file, const std::string &ppath, uint64_t offset)
+{
+	struct nfsfh *nfsfh = nullptr;
+	int ret = nfs_open(nfs, ppath.c_str(), 0400, &nfsfh);
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return 0;
+	}
 
+	void *buff = malloc(BUF_SIZE);
+	if (buff == nullptr)
+	{
+		nfs_close(nfs, nfsfh);
+		return 0;
+	}
+	int count = 0;
+	while ((count = nfs_read(nfs, nfsfh, BUF_SIZE, buff)) != 0)
+	{
+		if (count < 0)
+		{
+			sprintf(response, "%s", nfs_get_error(nfs));
+			nfs_close(nfs, nfsfh);
+			free((void *)buff);
+			return 0;
+		}
+		ret = split_file->Write((char *)buff, count);
+		if (ret < 0)
+		{
+			nfs_close(nfs, nfsfh);
+			free((void *)buff);
+			return 0;
+		}
+	}
+	nfs_close(nfs, nfsfh);
+	free((void *)buff);
+
+	return 1;
+}
 
 int NfsClient::GetRange(const std::string &path, DataSink &sink, uint64_t size, uint64_t offset)
 {
@@ -211,4 +337,325 @@ int NfsClient::GetRange(void *fp, DataSink &sink, uint64_t size, uint64_t offset
 
 	free((void *)buff);
 	return bytes_remaining == 0;
+}
+
+int NfsClient::GetRange(const std::string &ppath, void *buffer, uint64_t size, uint64_t offset)
+{
+	struct nfsfh *nfsfh = nullptr;
+	int ret = nfs_open(nfs, ppath.c_str(), 0400, &nfsfh);
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return 0;
+	}
+
+	ret = this->GetRange(nfsfh, buffer, size, offset);
+	nfs_close(nfs, nfsfh);
+
+	return ret;
+}
+
+int NfsClient::GetRange(void *fp, void *buffer, uint64_t size, uint64_t offset)
+{
+	struct nfsfh *nfsfh = (struct nfsfh *)fp;
+
+	int ret = nfs_lseek(nfs, nfsfh, offset, SEEK_SET, NULL);
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return 0;
+	}
+
+    size_t bytes_remaining = size;
+	char *buff = (char*)buffer;
+	int total = 0;
+	int count = 0;
+	do
+	{
+		count = nfs_read(nfs, nfsfh, bytes_remaining, buff);
+		if (count > 0)
+		{
+			bytes_remaining -= count;
+			buff += count;
+			total += count;
+		}
+		else
+		{
+			break;
+		}
+	} while (1);
+
+	if (total != size)
+		return 0;
+		
+	return 1;
+}
+
+int NfsClient::Copy(const std::string &ffrom, const std::string &tto)
+{
+	sprintf(response, "%s", lang_strings[STR_UNSUPPORTED_OPERATION_MSG]);
+	return 0;
+}
+
+int NfsClient::Move(const std::string &ffrom, const std::string &tto)
+{
+	sprintf(response, "%s", lang_strings[STR_UNSUPPORTED_OPERATION_MSG]);
+	return 0;
+}
+
+bool NfsClient::FileExists(const std::string &ppath)
+{
+	nfs_stat_64 st;
+	int ret = nfs_stat64(nfs, ppath.c_str(), &st);
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return 0;
+	}
+	return true;
+}
+
+/*
+ * Put - issue a PUT command and send data from input
+ *
+ * return 1 if successful, 0 otherwise
+ */
+int NfsClient::Put(const std::string &inputfile, const std::string &ppath, uint64_t offset)
+{
+	bytes_to_download = FS::GetSize(inputfile);
+	if (bytes_to_download < 0)
+	{
+		sprintf(response, "%s", lang_strings[STR_FAILED]);
+		return 0;
+	}
+
+	FILE* in = FS::OpenRead(inputfile);
+	if (in == NULL)
+	{
+		sprintf(response, "%s", lang_strings[STR_FAILED]);
+		return 0;
+	}
+	
+	struct nfsfh *nfsfh = nullptr;
+	int ret;
+	if (!FileExists(ppath))
+		ret = nfs_creat(nfs, ppath.c_str(), 0660, &nfsfh);
+	else
+	{
+		ret = nfs_open(nfs, ppath.c_str(), 0660, &nfsfh);
+	}
+
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		FS::Close(in);
+		return 0;
+	}
+
+	void* buff = malloc(BUF_SIZE);
+	if (buff == nullptr)
+	{
+		FS::Close(in);
+		nfs_close(nfs, nfsfh);
+		return 0;
+	}
+	int count = 0;
+	bytes_transfered = 0;
+	prev_tick = Util::GetTick();
+	while ((count = FS::Read(in, buff, BUF_SIZE)) != 0)
+	{
+		if (count < 0)
+		{
+			snprintf(response, sizeof(response), "%s", lang_strings[STR_FAILED]);
+			FS::Close(in);
+			nfs_close(nfs, nfsfh);
+			free(buff);
+			return 0;
+		}
+
+		ret = nfs_write(nfs, nfsfh, count, buff);
+		if (ret < 0)
+		{
+			sprintf(response, "%s", nfs_get_error(nfs));
+			FS::Close(in);
+			nfs_close(nfs, nfsfh);
+			free(buff);
+			return 0;
+		}
+		bytes_transfered += count;
+	}
+	FS::Close(in);
+	nfs_close(nfs, nfsfh);
+	free(buff);
+
+	return 1;
+}
+
+int NfsClient::Rename(const std::string &src, const std::string &dst)
+{
+	int ret = nfs_rename(nfs, src.c_str(), dst.c_str());
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return 0;
+	}
+	return 1;
+}
+
+int NfsClient::Delete(const std::string &ppath)
+{
+	int ret = nfs_unlink(nfs, ppath.c_str());
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return 0;
+	}
+	return 1;
+}
+
+int NfsClient::Size(const std::string &ppath, uint64_t *size)
+{
+	nfs_stat_64 st;
+	int ret = nfs_stat64(nfs, ppath.c_str(), &st);
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return 0;
+	}
+	*size = st.nfs_size;
+	return 1;
+}
+
+std::vector<DirEntry> NfsClient::ListDir(const std::string &path)
+{
+	std::vector<DirEntry> out;
+	DirEntry entry;
+	Util::SetupPreviousFolder(path, &entry);
+	out.push_back(entry);
+
+	struct nfsdir *nfsdir;
+	struct nfsdirent *nfsdirent;
+
+	int ret = nfs_opendir(nfs, path.c_str(), &nfsdir);
+	if (ret != 0) {
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return out;
+	}
+
+	while ((nfsdirent = nfs_readdir(nfs, nfsdir)))
+	{
+		DirEntry entry;
+		memset(&entry, 0, sizeof(entry));
+
+		if (!show_hidden_files && nfsdirent->name[0] == '.')
+			continue;
+
+		entry.selectable = true;
+		snprintf(entry.directory, 511, "%s", path.c_str());
+		snprintf(entry.name, 255, "%s", nfsdirent->name);
+		if (path.length() > 0 && path[path.length() - 1] == '/')
+		{
+			sprintf(entry.path, "%s%s", path.c_str(), nfsdirent->name);
+		}
+		else
+		{
+			sprintf(entry.path, "%s/%s", path.c_str(), nfsdirent->name);
+		}
+
+		entry.file_size = nfsdirent->size;
+		struct tm tm = *localtime(&nfsdirent->mtime.tv_sec);
+
+		entry.modified.day = tm.tm_mday;
+		entry.modified.month = tm.tm_mon + 1;
+		entry.modified.year = tm.tm_year + 1900;
+		entry.modified.hours = tm.tm_hour;
+		entry.modified.minutes = tm.tm_min;
+		entry.modified.seconds = tm.tm_sec;
+
+		switch (nfsdirent->mode & S_IFMT)
+		{
+		case S_IFLNK:
+			entry.isLink = true;
+			entry.file_size = 0;
+			sprintf(entry.display_size, "%s", lang_strings[STR_LINK]);
+			break;
+		case S_IFREG:
+			DirEntry::SetDisplaySize(&entry);
+			break;
+		case S_IFDIR:
+			entry.isDir = true;
+			entry.file_size = 0;
+			sprintf(entry.display_size, "%s", lang_strings[STR_FOLDER]);
+			break;
+		default:
+			continue;
+			break;
+		}
+		if (strcmp(entry.name, "..") != 0 && strcmp(entry.name, ".") != 0)
+			out.push_back(entry);
+
+	}
+	nfs_closedir(nfs, nfsdir);
+
+	return out;
+}
+
+std::string NfsClient::GetPath(std::string ppath1, std::string ppath2)
+{
+	std::string path1 = ppath1;
+	std::string path2 = ppath2;
+	path1 = Util::Trim(Util::Trim(path1, " "), "/");
+	path2 = Util::Trim(Util::Trim(path2, " "), "/");
+	path1 = "/" + path1 + "/" + path2;
+	return path1;
+}
+
+int NfsClient::Head(const std::string &ppath, void *buffer, uint64_t len)
+{
+	if (!FileExists(ppath))
+	{
+		return 0;
+	}
+
+	struct nfsfh *nfsfh = nullptr;
+	int ret = nfs_open(nfs, ppath.c_str(), 0400, &nfsfh);
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return 0;
+	}
+
+	int count = nfs_read(nfs, nfsfh, len, buffer);
+	nfs_close(nfs, nfsfh);
+	if (count != len)
+		return 0;
+
+	return 1;
+}
+
+ClientType NfsClient::clientType()
+{
+	return CLIENT_TYPE_NFS;
+}
+
+uint32_t NfsClient::SupportedActions()
+{
+	return REMOTE_ACTION_ALL ^ REMOTE_ACTION_CUT ^ REMOTE_ACTION_COPY ^ REMOTE_ACTION_PASTE;
+}
+
+void *NfsClient::Open(const std::string &path, int flags)
+{
+	struct nfsfh *nfsfh = nullptr;
+	int ret = nfs_open(nfs, path.c_str(), 0400, &nfsfh);
+	if (ret != 0)
+	{
+		sprintf(response, "%s", nfs_get_error(nfs));
+		return nullptr;
+	}
+	return nfsfh;
+}
+
+void NfsClient::Close(void *fp)
+{
+	nfs_close(nfs, (struct nfsfh *)fp);
 }

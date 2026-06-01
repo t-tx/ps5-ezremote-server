@@ -177,6 +177,24 @@ namespace Util
         return tick.tv_sec * 1000000 + tick.tv_usec;
     }
 
+    static void SetupPreviousFolder(const std::string &path, DirEntry *entry)
+    {
+        memset(entry, 0, sizeof(DirEntry));
+        if (path[path.length() - 1] == '/' && path.length() > 1)
+        {
+            strlcpy(entry->directory, path.c_str(), path.length() - 1);
+            char *last_slash = strrchr(entry->directory, '/');
+            if (last_slash != NULL && strlen(last_slash) > 1)
+                last_slash[1] = 0;
+        }
+        else
+            strlcpy(entry->directory, path.c_str(), path.length() + 1);
+
+        entry->isDir = true;
+        strlcpy(entry->name, "..", 3);
+        strlcpy(entry->path, entry->directory, sizeof(entry->path));
+    }
+
     static void Notify(const char *fmt, ...)
     {
         notify_request_t req;

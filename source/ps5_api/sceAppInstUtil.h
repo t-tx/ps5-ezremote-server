@@ -111,7 +111,6 @@ typedef struct {
 
 extern "C"
 {
-    int sceAppInstUtilAppInstallPkg(const char *path, SceAppInstallPkgInfo *pkg_info);
     int sceAppInstUtilInstallByPackage(MetaInfo* arg1, SceAppInstallPkgInfo* pkg_info, PlayGoInfo* arg2);
     int sceAppInstUtilGetInstallStatus(const char* content_id, SceAppInstallStatusInstalled* status);
     int sceAppInstUtilInitialize(void);

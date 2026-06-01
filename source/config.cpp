@@ -11,7 +11,7 @@
 #include <json-c/json.h>
 #include "server/http_server.h"
 #include "config.h"
-#include "fs.h"
+#include "ps5_api/fs.h"
 #include "crypt.h"
 #include "base64.h"
 #include "util.h"
@@ -25,6 +25,39 @@ unsigned char cipher_iv[16] = {'Y', 'p', '3', 's', '6', 'v', '9', 'y', '$', 'B',
 std::shared_mutex pkg_mutex_;
 std::shared_mutex download_mutex_;
 uint64_t *g_bytes_transfered;
+
+static bool IsExpired(uint64_t timestamp, uint64_t now)
+{
+    if (now < timestamp)
+        return false;
+
+    return (now - timestamp) >= MAX_PKG_HISTORY_RETENTION;
+}
+
+static void PrunePackageHistoryLocked()
+{
+    uint64_t now = Util::GetTick();
+    for (auto it = pkg_download_history.begin(); it != pkg_download_history.end();)
+    {
+        if (IsExpired(it->second.timestamp, now))
+            it = pkg_download_history.erase(it);
+        else
+            ++it;
+    }
+}
+
+static void PruneBgDownloadListLocked()
+{
+    uint64_t now = Util::GetTick();
+    for (auto it = bg_download_list.begin(); it != bg_download_list.end();)
+    {
+        bool terminal_state = (it->state == STATE_FAILED || it->state == STATE_SUCCESS);
+        if (terminal_state && IsExpired(it->timestamp, now))
+            it = bg_download_list.erase(it);
+        else
+            ++it;
+    }
+}
 
 namespace CONFIG
 {
@@ -69,6 +102,7 @@ namespace CONFIG
 	void AddPackageInstallHostData(const std::string &hash, PackageInstallData pkg_data)
 	{
 		std::unique_lock<std::shared_mutex> lock(pkg_mutex_);
+		PrunePackageHistoryLocked();
 		std::pair<std::string, PackageInstallData> pair = std::make_pair(hash, pkg_data);
 		pkg_download_history.erase(hash);
 		pkg_download_history.insert(pair);
@@ -85,7 +119,15 @@ namespace CONFIG
         if (FS::FileExists(PKG_INSTALL_HISTORY_PATH))
         {
             json_object *jobj = json_object_from_file(PKG_INSTALL_HISTORY_PATH);
+            if (jobj == nullptr)
+                return;
+
             struct array_list *history_list = json_object_get_array(jobj);
+            if (history_list == nullptr)
+            {
+                json_object_put(jobj);
+                return;
+            }
 
             for (size_t history_idx = 0; history_idx < history_list->length; ++history_idx)
             {
@@ -124,6 +166,7 @@ namespace CONFIG
     void SavePackageInstallHostData()
     {
         std::unique_lock<std::shared_mutex> lock(pkg_mutex_);
+        PrunePackageHistoryLocked();
 
         if (!FS::FolderExists(DATA_PATH))
         {
@@ -131,37 +174,33 @@ namespace CONFIG
         }
 
         json_object *history_list = json_object_new_array();
-        uint64_t current_time = Util::GetTick();
 
         for (auto it = pkg_download_history.begin(); it != pkg_download_history.end(); ++it)
         {
-            if (current_time - it->second.timestamp < MAX_PKG_HISTORY_RETENTION)
-            {
-                json_object *history_item_obj = json_object_new_object();
-                json_object_object_add(history_item_obj, "hash", json_object_new_string(it->first.c_str()));
-                json_object_object_add(history_item_obj, "url", json_object_new_string(it->second.host_info.url.c_str()));
-                json_object_object_add(history_item_obj, "path", json_object_new_string(it->second.path.c_str()));
-                json_object_object_add(history_item_obj, "username", json_object_new_string(it->second.host_info.username.c_str()));
-                json_object_object_add(history_item_obj, "type", json_object_new_int(it->second.host_info.type));
-                json_object_object_add(history_item_obj, "size", json_object_new_uint64(it->second.file_size));
-                json_object_object_add(history_item_obj, "timestamp", json_object_new_uint64(it->second.timestamp));
-                if (!it->second.direct_url.empty()) {
-                    json_object_object_add(history_item_obj, "direct_url", json_object_new_string(it->second.direct_url.c_str()));
-                }
-                if (it->second.host_info.type == CLIENT_TYPE_HTTP_SERVER)
-                {
-                    json_object_object_add(history_item_obj, "http_server_type", json_object_new_string(it->second.host_info.http_server_type.c_str()));
-                }
-
-                std::string encrypted_password;
-                if (!it->second.host_info.password.empty())
-                {
-                    Encrypt(it->second.host_info.password, encrypted_password);
-                }
-                json_object_object_add(history_item_obj, "password", json_object_new_string(encrypted_password.c_str()));
-
-                json_object_array_add(history_list, history_item_obj);
+            json_object *history_item_obj = json_object_new_object();
+            json_object_object_add(history_item_obj, "hash", json_object_new_string(it->first.c_str()));
+            json_object_object_add(history_item_obj, "url", json_object_new_string(it->second.host_info.url.c_str()));
+            json_object_object_add(history_item_obj, "path", json_object_new_string(it->second.path.c_str()));
+            json_object_object_add(history_item_obj, "username", json_object_new_string(it->second.host_info.username.c_str()));
+            json_object_object_add(history_item_obj, "type", json_object_new_int(it->second.host_info.type));
+            json_object_object_add(history_item_obj, "size", json_object_new_uint64(it->second.file_size));
+            json_object_object_add(history_item_obj, "timestamp", json_object_new_uint64(it->second.timestamp));
+            if (!it->second.direct_url.empty()) {
+                json_object_object_add(history_item_obj, "direct_url", json_object_new_string(it->second.direct_url.c_str()));
             }
+            if (it->second.host_info.type == CLIENT_TYPE_HTTP_SERVER)
+            {
+                json_object_object_add(history_item_obj, "http_server_type", json_object_new_string(it->second.host_info.http_server_type.c_str()));
+            }
+
+            std::string encrypted_password;
+            if (!it->second.host_info.password.empty())
+            {
+                Encrypt(it->second.host_info.password, encrypted_password);
+            }
+            json_object_object_add(history_item_obj, "password", json_object_new_string(encrypted_password.c_str()));
+
+            json_object_array_add(history_list, history_item_obj);
         }
         
         json_object_to_file(PKG_INSTALL_HISTORY_PATH, history_list);
@@ -171,6 +210,7 @@ namespace CONFIG
 	void AddBgDownloadData(BgDownloadData pkg_data)
 	{
 		std::unique_lock<std::shared_mutex> lock(download_mutex_);
+		PruneBgDownloadListLocked();
 		bg_download_list.push_back(pkg_data);
 	}
 
@@ -179,7 +219,15 @@ namespace CONFIG
         if (FS::FileExists(BG_DOWNLOAD_HISTORY_PATH))
         {
             json_object *jobj = json_object_from_file(BG_DOWNLOAD_HISTORY_PATH);
+            if (jobj == nullptr)
+                return;
+
             struct array_list *history_list = json_object_get_array(jobj);
+            if (history_list == nullptr)
+            {
+                json_object_put(jobj);
+                return;
+            }
 
             for (size_t history_idx = 0; history_idx < history_list->length; ++history_idx)
             {
@@ -226,6 +274,7 @@ namespace CONFIG
     void SaveBgDownloadData()
     {
         std::unique_lock<std::shared_mutex> lock(download_mutex_);
+        PruneBgDownloadListLocked();
 
         if (!FS::FolderExists(DATA_PATH))
         {
@@ -233,42 +282,38 @@ namespace CONFIG
         }
 
         json_object *history_list = json_object_new_array();
-        uint64_t current_time = Util::GetTick();
 
         for (auto it = bg_download_list.begin(); it != bg_download_list.end(); ++it)
         {
-            if (current_time - it->timestamp < MAX_PKG_HISTORY_RETENTION)
+            json_object *history_item_obj = json_object_new_object();
+            json_object_object_add(history_item_obj, "type", json_object_new_int(it->host_info.type));
+            json_object_object_add(history_item_obj, "url", json_object_new_string(it->host_info.url.c_str()));
+            if (it->host_info.type == CLIENT_TYPE_HTTP_SERVER)
             {
-                json_object *history_item_obj = json_object_new_object();
-                json_object_object_add(history_item_obj, "type", json_object_new_int(it->host_info.type));
-                json_object_object_add(history_item_obj, "url", json_object_new_string(it->host_info.url.c_str()));
-                if (it->host_info.type == CLIENT_TYPE_HTTP_SERVER)
-                {
-                    json_object_object_add(history_item_obj, "http_server_type", json_object_new_string(it->host_info.http_server_type.c_str()));
-                }
-
-                std::string encrypted_password;
-                if (!it->host_info.password.empty())
-                {
-                    Encrypt(it->host_info.password, encrypted_password);
-                }
-
-                json_object_object_add(history_item_obj, "username", json_object_new_string(it->host_info.username.c_str()));
-                json_object_object_add(history_item_obj, "password", json_object_new_string(encrypted_password.c_str()));
-                json_object_object_add(history_item_obj, "src_path", json_object_new_string(it->src_path.c_str()));
-                json_object_object_add(history_item_obj, "dest_path", json_object_new_string(it->dest_path.c_str()));
-                json_object_object_add(history_item_obj, "file_size", json_object_new_uint64(it->file_size));
-                json_object_object_add(history_item_obj, "bytes_transfered", json_object_new_uint64(it->bytes_transfered));
-                json_object_object_add(history_item_obj, "state", json_object_new_int(it->state));
-                if (it->state == STATE_FAILED && !it->fail_reason.empty())
-                {
-                    json_object_object_add(history_item_obj, "fail_reason", json_object_new_string(it->fail_reason.c_str()));
-                }
-                json_object_object_add(history_item_obj, "id", json_object_new_uint64(it->id));
-                json_object_object_add(history_item_obj, "timestamp", json_object_new_uint64(it->timestamp));
-
-                json_object_array_add(history_list, history_item_obj);
+                json_object_object_add(history_item_obj, "http_server_type", json_object_new_string(it->host_info.http_server_type.c_str()));
             }
+
+            std::string encrypted_password;
+            if (!it->host_info.password.empty())
+            {
+                Encrypt(it->host_info.password, encrypted_password);
+            }
+
+            json_object_object_add(history_item_obj, "username", json_object_new_string(it->host_info.username.c_str()));
+            json_object_object_add(history_item_obj, "password", json_object_new_string(encrypted_password.c_str()));
+            json_object_object_add(history_item_obj, "src_path", json_object_new_string(it->src_path.c_str()));
+            json_object_object_add(history_item_obj, "dest_path", json_object_new_string(it->dest_path.c_str()));
+            json_object_object_add(history_item_obj, "file_size", json_object_new_uint64(it->file_size));
+            json_object_object_add(history_item_obj, "bytes_transfered", json_object_new_uint64(it->bytes_transfered));
+            json_object_object_add(history_item_obj, "state", json_object_new_int(it->state));
+            if (it->state == STATE_FAILED && !it->fail_reason.empty())
+            {
+                json_object_object_add(history_item_obj, "fail_reason", json_object_new_string(it->fail_reason.c_str()));
+            }
+            json_object_object_add(history_item_obj, "id", json_object_new_uint64(it->id));
+            json_object_object_add(history_item_obj, "timestamp", json_object_new_uint64(it->timestamp));
+
+            json_object_array_add(history_list, history_item_obj);
         }
         
         json_object_to_file(BG_DOWNLOAD_HISTORY_PATH, history_list);
@@ -285,3 +330,4 @@ namespace CONFIG
         download_mutex_.unlock();
     }
 }
+int http_int_server_port = 9090;
