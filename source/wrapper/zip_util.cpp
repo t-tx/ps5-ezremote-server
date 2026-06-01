@@ -25,6 +25,8 @@ namespace ZipUtil
 {
     static char filename_extracted[256];
     static char password[128];
+    static const char* DEFAULT_PASSWORDS[] = {"hako", "downloadgameps3.com", "DLPSGAME.COM", "SuperPSX", "www.DLPSGAME.COM"};
+    static int password_attempt_idx = 0;
 
     void callback_7zip(const char *fileName, unsigned long fileSize, unsigned fileNum, unsigned numFiles)
     {
@@ -415,6 +417,14 @@ namespace ZipUtil
      */
     static const char *passphrase_callback(struct archive *a, void *_client_data)
     {
+        int num_defaults = sizeof(DEFAULT_PASSWORDS) / sizeof(DEFAULT_PASSWORDS[0]);
+        if (password_attempt_idx < num_defaults)
+        {
+            snprintf(password, 127, "%s", DEFAULT_PASSWORDS[password_attempt_idx]);
+            password_attempt_idx++;
+            return password;
+        }
+
         Dialog::initImeDialog(lang_strings[STR_PASSWORD], password, 127, SCE_IME_TYPE_DEFAULT, 560, 200);
         int ime_result = Dialog::updateImeDialog();
         if (ime_result == IME_DIALOG_RESULT_FINISHED || ime_result == IME_DIALOG_RESULT_CANCELED)
@@ -533,6 +543,8 @@ namespace ZipUtil
         int ret;
         uintmax_t total_size, file_count, error_count;
 
+        password_attempt_idx = 0;
+
         if ((a = archive_read_new()) == NULL)
         {
             sprintf(status_message, "%s", "archive_read_new failed");
@@ -617,6 +629,8 @@ namespace ZipUtil
         mode_t filetype;
         ArchiveEntry *pkg_entry = nullptr;
         int ret;
+
+        password_attempt_idx = 0;
 
         if ((a = archive_read_new()) == NULL)
         {

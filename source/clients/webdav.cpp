@@ -30,7 +30,7 @@ bool WebDAVClient::PropFind(const std::string &path, int depth, CHTTPClient::Htt
     CHTTPClient::HeadersMap headers;
     headers["Accept"] = "*/*";
     headers["Depth"] = Util::ToString(depth);
-    std::string encoded_path = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encoded_path = this->host_url + Util::UrlEncode(GetFullPath(path));
 
     return client->CustomRequest("PROPFIND", encoded_path, headers, res);
 }
@@ -179,7 +179,7 @@ int WebDAVClient::Put(const std::string &inputfile, const std::string &path, uin
     prev_tick = Util::GetTick();
 
     client->SetProgressFnCallback(&bytes_transfered, UploadProgressCallback);
-    std::string encode_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encode_url = this->host_url + Util::UrlEncode(GetFullPath(path));
     long status;
 
     if (client->UploadFile(inputfile, encode_url, status))
@@ -200,7 +200,7 @@ int WebDAVClient::Mkdir(const std::string &path)
 
     headers["Accept"] =  "*/*";
     headers["Connection"] = "Keep-Alive";
-    std::string encode_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encode_url = this->host_url + Util::UrlEncode(GetFullPath(path));
 
     if (client->CustomRequest("MKCOL", encode_url, headers, res))
     {
@@ -228,7 +228,7 @@ int WebDAVClient::Delete(const std::string &path)
 
     headers["Accept"] =  "*/*";
     headers["Connection"] = "Keep-Alive";
-    std::string encode_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encode_url = this->host_url + Util::UrlEncode(GetFullPath(path));
 
     if (client->CustomRequest("DELETE", encode_url, headers, res))
     {
@@ -247,7 +247,7 @@ int WebDAVClient::Copy(const std::string &from, const std::string &to)
 
     headers["Accept"] =  "*/*";
     headers["Destination"] = GetFullPath(to);
-    std::string encode_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(from));
+    std::string encode_url = this->host_url + Util::UrlEncode(GetFullPath(from));
 
     if (client->CustomRequest("COPY", encode_url, headers, res))
     {
@@ -265,7 +265,7 @@ int WebDAVClient::Move(const std::string &from, const std::string &to)
 
     headers["Accept"] =  "*/*";
     headers["Destination"] = GetFullPath(to);
-    std::string encode_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(from));
+    std::string encode_url = this->host_url + Util::UrlEncode(GetFullPath(from));
 
     if (client->CustomRequest("MOVE", encode_url, headers, res))
     {

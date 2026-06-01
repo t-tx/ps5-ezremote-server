@@ -32,7 +32,7 @@ std::vector<DirEntry> ApacheClient::ListDir(const std::string &path)
     entry.selectable = false;
     out.push_back(entry);
 
-    std::string encoded_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
     if (client->Get(encoded_url, headers, res))
     {
         if (HTTP_SUCCESS(res.iCode))

@@ -22,7 +22,7 @@ std::vector<DirEntry> MyrientClient::ListDir(const std::string &path)
     Util::SetupPreviousFolder(path, &entry);
     out.push_back(entry);
 
-    std::string encoded_path = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path)+"/");
+    std::string encoded_path = this->host_url + Util::UrlEncode(GetFullPath(path)+"/");
     if (client->Get(encoded_path, headers, res))
     {
         lxb_status_t status;

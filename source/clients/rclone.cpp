@@ -17,7 +17,7 @@ std::vector<DirEntry> RCloneClient::ListDir(const std::string &path)
     Util::SetupPreviousFolder(path, &entry);
     out.push_back(entry);
 
-    std::string encoded_path = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path)+"/");
+    std::string encoded_path = this->host_url + Util::UrlEncode(GetFullPath(path)+"/");
     if (client->Get(encoded_path, headers, res))
     {
         if (HTTP_SUCCESS(res.iCode))

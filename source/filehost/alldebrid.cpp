@@ -1,3 +1,4 @@
+#include "util.h"
 #include "httpclient/HTTPClient.h"
 #include <json-c/json.h>
 
@@ -46,7 +47,7 @@ std::string AllDebridHost::GetDownloadUrl()
     tmp_client.InitSession(true, CHTTPClient::SettingsFlag::NO_FLAGS);
     tmp_client.SetCertificateFile(CACERT_FILE);
 
-    std::string path = std::string("https://api.alldebrid.com/v4/link/unlock?agent=ezRemoteClient&apikey=") + alldebrid_api_key +  "&link=" + CHTTPClient::EncodeUrl(url);
+    std::string path = std::string("https://api.alldebrid.com/v4/link/unlock?agent=ezRemoteClient&apikey=") + alldebrid_api_key +  "&link=" + Util::UrlEncode(url);
     if (tmp_client.Get(path, headers, res))
     {
         if (HTTP_SUCCESS(res.iCode))

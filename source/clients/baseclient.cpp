@@ -203,7 +203,7 @@ int BaseClient::Size(const std::string &path, uint64_t *size)
     CHTTPClient::HeadersMap headers;
     CHTTPClient::HttpResponse res;
 
-    std::string encoded_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
     client->SetProgressFnCallback(nullptr, NothingCallback);
     if (client->Head(encoded_url, headers, res))
     {
@@ -256,7 +256,7 @@ int BaseClient::Get(const std::string &outputfile, const std::string &path, uint
     }
 
     client->SetProgressFnCallback(&bytes_transfered, DownloadProgressCallback);
-    std::string encoded_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
     if (client->DownloadFile(outputfile, encoded_url, status))
     {
         if (HTTP_SUCCESS(status))
@@ -278,7 +278,7 @@ int BaseClient::Get(SplitFile *split_file, const std::string &path, uint64_t off
     CHTTPClient::HeadersMap headers;
 
     prev_tick = Util::GetTick();
-    std::string encoded_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
     client->SetProgressFnCallback(nullptr, NothingCallback);
     if (client->DownloadFile((void*)split_file, encoded_url, (void*)WriteToSplitFileCallback, status))
     {
@@ -303,7 +303,7 @@ int BaseClient::GetRange(const std::string &path, DataSink &sink, uint64_t size,
     sprintf(range_header, "bytes=%lu-%lu", offset, offset + size - 1);
     headers["Range"] = range_header;
 
-    std::string encoded_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
     RangeTransferContext out = {&res, &sink, nullptr, offset, size, 0, false, false};
     if (client->Get(encoded_url, headers, res, (void*) &WriteDataSinkCallback, (void*)&out))
     {
@@ -332,7 +332,7 @@ int BaseClient::GetRange(const std::string &path, void *buffer, uint64_t size, u
     sprintf(range_header, "bytes=%lu-%lu", offset, offset + size - 1);
     headers["Range"] = range_header;
 
-    std::string encoded_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
     client->SetProgressFnCallback(nullptr, NothingCallback);
     RangeTransferContext out = {&res, nullptr, (char*)buffer, offset, size, 0, false, false};
     if (client->Get(encoded_url, headers, res, (void*) &WriteBufferCallback, (void*) &out))
@@ -392,7 +392,7 @@ int BaseClient::Head(const std::string &path, void *buffer, uint64_t size)
     sprintf(range_header, "bytes=%lu-%lu", 0L, size - 1);
     headers["Range"] = range_header;
 
-    std::string encoded_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
     client->SetProgressFnCallback(nullptr, NothingCallback);
     RangeTransferContext out = {&res, nullptr, (char*)buffer, 0, size, 0, false, false};
     if (client->Get(encoded_url, headers, res, (void*) &WriteBufferCallback, (void*) &out))
@@ -457,7 +457,7 @@ bool BaseClient::Ping()
     CHTTPClient::HttpResponse res;
     CHTTPClient::HeadersMap headers;
 
-    std::string encoded_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath("/"));
+    std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath("/"));
     if (client->Head(encoded_url, headers, res))
     {
         return true;
@@ -500,7 +500,7 @@ std::string BaseClient::GetDirectUrl(const std::string &path)
     if (this->host_url.empty())
         return "";
 
-    return this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    return this->host_url + Util::UrlEncode(GetFullPath(path));
 }
 
 std::string BaseClient::Escape(const std::string &url)

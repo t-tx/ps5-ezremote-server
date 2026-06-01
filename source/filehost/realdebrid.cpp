@@ -1,3 +1,4 @@
+#include "util.h"
 #include "httpclient/HTTPClient.h"
 #include <json-c/json.h>
 
@@ -20,7 +21,7 @@ bool RealDebridHost::IsValidUrl()
     headers["Authorization"] = std::string("Bearer ") + realdebrid_api_key;
     headers["Content-Type"] = "application/x-www-form-urlencoded";
     std::string path = std::string("https://api.real-debrid.com/rest/1.0/unrestrict/check");
-    std::string post_data = std::string("link=") + CHTTPClient::EncodeUrl(this->url) + "&password=";
+    std::string post_data = std::string("link=") + Util::UrlEncode(this->url) + "&password=";
 
     if (tmp_client.Post(path, headers, post_data, res))
     {
@@ -53,7 +54,7 @@ std::string RealDebridHost::GetDownloadUrl()
     headers["Authorization"] = std::string("Bearer ") + realdebrid_api_key;
     headers["Content-Type"] = "application/x-www-form-urlencoded";
     std::string path = std::string("https://api.real-debrid.com/rest/1.0/unrestrict/link");
-    std::string post_data = std::string("link=") + CHTTPClient::EncodeUrl(this->url) + "&password=&remote=0";
+    std::string post_data = std::string("link=") + Util::UrlEncode(this->url) + "&password=&remote=0";
 
     if (tmp_client.Post(path, headers, post_data, res))
     {

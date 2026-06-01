@@ -17,7 +17,7 @@ std::vector<DirEntry> IISClient::ListDir(const std::string &path)
     Util::SetupPreviousFolder(path, &entry);
     out.push_back(entry);
 
-    std::string encode_url = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path));
+    std::string encode_url = this->host_url + Util::UrlEncode(GetFullPath(path));
     if (client->Get(encode_url, headers, res))
     {
         if (HTTP_SUCCESS(res.iCode))

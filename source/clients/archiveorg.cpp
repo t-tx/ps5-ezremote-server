@@ -59,7 +59,7 @@ int ArchiveOrgClient::Login(const std::string &username, const std::string &pass
     CHTTPClient::HeadersMap headers;
     CHTTPClient::HttpResponse res;
 
-    std::string encoded_path = this->host_url + CHTTPClient::EncodeUrl("/account/login");
+    std::string encoded_path = this->host_url + Util::UrlEncode("/account/login");
     CHTTPClient::PostFormInfo formdata;
     formdata.AddFormContent("username", username);
     formdata.AddFormContent("password", password);
@@ -95,7 +95,7 @@ std::vector<DirEntry> ArchiveOrgClient::ListDir(const std::string &path)
     Util::SetupPreviousFolder(path, &entry);
     out.push_back(entry);
 
-    std::string encoded_path = this->host_url + CHTTPClient::EncodeUrl(GetFullPath(path)+"/");
+    std::string encoded_path = this->host_url + Util::UrlEncode(GetFullPath(path)+"/");
     if (client->Get(encoded_path, headers, res))
     {
         lxb_status_t status;

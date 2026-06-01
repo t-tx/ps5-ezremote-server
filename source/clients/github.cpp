@@ -131,7 +131,7 @@ int GithubClient::Head(const std::string &path, void *buffer, uint64_t size)
     sprintf(range_header, "bytes=%lu-%lu", 0L, size - 1);
     headers["Range"] = range_header;
 
-    std::string encoded_url = this->m_download_url + CHTTPClient::EncodeUrl(m_assets[path_parts[0]][path_parts[1]].url);
+    std::string encoded_url = this->m_download_url + Util::UrlEncode(m_assets[path_parts[0]][path_parts[1]].url);
     client->SetProgressFnCallback(nullptr, NothingCallback);
     if (client->Get(encoded_url, headers, res))
     {
@@ -170,7 +170,7 @@ int GithubClient::Get(const std::string &outputfile, const std::string &path, ui
     }
 
     client->SetProgressFnCallback(&bytes_transfered, DownloadProgressCallback);
-    std::string encoded_url = this->m_download_url + CHTTPClient::EncodeUrl(m_assets[path_parts[0]][path_parts[1]].url);
+    std::string encoded_url = this->m_download_url + Util::UrlEncode(m_assets[path_parts[0]][path_parts[1]].url);
     if (client->DownloadFile(outputfile, encoded_url, status))
     {
         return 1;
@@ -198,7 +198,7 @@ int GithubClient::Get(SplitFile *split_file, const std::string &path, uint64_t o
     CHTTPClient::HeadersMap headers;
 
     prev_tick = Util::GetTick();
-    std::string encoded_url = this->m_download_url + CHTTPClient::EncodeUrl(m_assets[path_parts[0]][path_parts[1]].url);
+    std::string encoded_url = this->m_download_url + Util::UrlEncode(m_assets[path_parts[0]][path_parts[1]].url);
     client->SetProgressFnCallback(nullptr, NothingCallback);
     if (client->DownloadFile((void*)split_file, encoded_url, (void*)WriteToSplitFileCallback, status))
     {
@@ -232,7 +232,7 @@ int GithubClient::GetRange(const std::string &path, void *buffer, uint64_t size,
     sprintf(range_header, "bytes=%lu-%lu", offset, offset + size - 1);
     headers["Range"] = range_header;
 
-    std::string encoded_url = this->m_download_url + CHTTPClient::EncodeUrl(m_assets[path_parts[0]][path_parts[1]].url);
+    std::string encoded_url = this->m_download_url + Util::UrlEncode(m_assets[path_parts[0]][path_parts[1]].url);
     client->SetProgressFnCallback(nullptr, NothingCallback);
     if (client->Get(encoded_url, headers, res))
     {
@@ -266,7 +266,7 @@ int GithubClient::GetRange(const std::string &path, DataSink &sink, uint64_t siz
     sprintf(range_header, "bytes=%lu-%lu", offset, offset + size - 1);
     headers["Range"] = range_header;
 
-    std::string encoded_url = this->m_download_url + CHTTPClient::EncodeUrl(m_assets[path_parts[0]][path_parts[1]].url);
+    std::string encoded_url = this->m_download_url + Util::UrlEncode(m_assets[path_parts[0]][path_parts[1]].url);
     client->SetProgressFnCallback(nullptr, NothingCallback);
     if (client->Get(encoded_url, headers, res))
     {
@@ -383,7 +383,7 @@ std::string GithubClient::GetDownloadUrl(const std::string &path)
         return "";
     }
 
-    return this->m_download_url + CHTTPClient::EncodeUrl(m_assets[path_parts[0]][path_parts[1]].url);
+    return this->m_download_url + Util::UrlEncode(m_assets[path_parts[0]][path_parts[1]].url);
 }
 
 std::string GithubClient::GetDirectUrl(const std::string &path)
