@@ -54,6 +54,8 @@ add_executable(${PROJECT_NAME}.elf
   source/main.cpp
   source/server/legacy_dpi_server.cpp
   source/usecase/dpi_usecase.cpp
+  source/usecase/pkg_install_usecase.cpp
+  source/usecase/file_manager_usecase.cpp
 )
 
 target_compile_definitions(${PROJECT_NAME}.elf PRIVATE EZREMOTE_VERSION=${APP_VERSION} CPPHTTPLIB_THREAD_POOL_COUNT=64)
