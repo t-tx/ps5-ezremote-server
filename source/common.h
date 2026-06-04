@@ -14,6 +14,12 @@
 
 enum DownloadState { STATE_PENDING, STATE_DOWNLOADING, STATE_RESUMED, STATE_FAILED, STATE_SUCCESS };
 
+enum ExtractState { EXTRACT_STATE_PENDING, EXTRACT_STATE_EXTRACTING, EXTRACT_STATE_FAILED, EXTRACT_STATE_SUCCESS };
+
+enum FileOpState { FILEOP_STATE_PENDING, FILEOP_STATE_PROCESSING, FILEOP_STATE_FAILED, FILEOP_STATE_SUCCESS };
+
+enum FileOpType { FILEOP_COPY, FILEOP_MOVE, FILEOP_DELETE };
+
 static const char* state_strings[] = {"Pending", "Downloading", "Resumed", "Failed", "Success"};
 
 typedef struct
@@ -95,6 +101,23 @@ struct DownloadProgress
     uint64_t bytes_transfered;
     uint64_t file_size;
     time_t timestamp;
+    bool cancel_requested = false;
+};
+
+struct BgFileOpData
+{
+    uint64_t id;
+    FileOpType type;
+    std::vector<std::string> items;
+    std::string dest_path;
+    std::string fail_reason;
+    FileOpState state;
+    uint64_t items_processed;
+    uint64_t total_items;
+    time_t timestamp;
+    uint64_t finished_timestamp = 0;
+    int retry_count = 0;
+    bool cancel_requested = false;
 };
 
 static lxb_dom_node_t *NextChildElement(lxb_dom_element_t *element)

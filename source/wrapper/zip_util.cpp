@@ -535,7 +535,7 @@ namespace ZipUtil
      * Main loop: open the zipfile, iterate over its contents and decide what
      * to do with each entry.
      */
-    int Extract(const DirEntry &file, const std::string &basepath, RemoteClient *client)
+    int Extract(const DirEntry &file, const std::string &basepath, RemoteClient *client, bool* cancel_flag)
     {
         struct archive *a;
         struct archive_entry *e;
@@ -597,7 +597,7 @@ namespace ZipUtil
         FS::MkDirs(basepath.c_str());
         for (;;)
         {
-            if (stop_activity)
+            if (stop_activity || (cancel_flag && *cancel_flag))
                 break;
 
             ret = archive_read_next_header(a, &e);

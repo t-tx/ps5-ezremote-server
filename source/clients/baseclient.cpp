@@ -251,8 +251,7 @@ int BaseClient::Get(const std::string &outputfile, const std::string &path, uint
 
     if (!Size(path, &bytes_to_download))
     {
-        sprintf(this->response, "%s", lang_strings[STR_FAIL_DOWNLOAD_MSG]);
-        return 0;
+        bytes_to_download = 0; // Unknown size, but continue downloading
     }
 
     client->SetProgressFnCallback(&bytes_transfered, DownloadProgressCallback);

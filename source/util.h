@@ -395,7 +395,7 @@ namespace Util
         for (std::string::const_iterator i = value.begin(), n = value.end(); i != n; ++i) {
             std::string::value_type c = (*i);
 
-            if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~' || c == '/') {
+            if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~' || c == '/' || c == '[' || c == ']') {
                 escaped << c;
                 continue;
             }
@@ -407,5 +407,23 @@ namespace Util
 
         return escaped.str();
     }
+    // Decode URL‑encoded strings (e.g., "%20" -> ' ')
+    static std::string UrlDecode(const std::string &value) {
+        std::ostringstream decoded;
+        for (size_t i = 0; i < value.length(); ++i) {
+            if (value[i] == '%' && i + 2 < value.length()) {
+                std::string hex = value.substr(i + 1, 2);
+                char ch = (char)std::stoi(hex, nullptr, 16);
+                decoded << ch;
+                i += 2;
+            } else if (value[i] == '+') {
+                decoded << ' ';
+            } else {
+                decoded << value[i];
+            }
+        }
+        return decoded.str();
+    }
 }
+
 #endif

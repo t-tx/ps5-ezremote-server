@@ -35,7 +35,7 @@ bool WebDAVClient::PropFind(const std::string &path, int depth, CHTTPClient::Htt
     return client->CustomRequest("PROPFIND", encoded_path, headers, res);
 }
 
-int WebDAVClient::Size(const std::string &path, int64_t *size)
+int WebDAVClient::Size(const std::string &path, uint64_t *size)
 {
     CHTTPClient::HttpResponse res;
 

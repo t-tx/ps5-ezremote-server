@@ -353,6 +353,9 @@ void dbglogger_printf(const char* fmt, ...) {
     }
 }
 
+#include <pthread.h>
+static pthread_mutex_t dbg_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 void dbglogger_log(const char* fmt, ...) {
     if (loggerMode) {
         char buffer[0x800];
@@ -362,7 +365,9 @@ void dbglogger_log(const char* fmt, ...) {
         vsnprintf(buffer, sizeof(buffer), fmt, arg);
         va_end(arg);
 
+        pthread_mutex_lock(&dbg_log_mutex);
         dbglogger_printf("%s\n", buffer);
+        pthread_mutex_unlock(&dbg_log_mutex);
     }
 }
 

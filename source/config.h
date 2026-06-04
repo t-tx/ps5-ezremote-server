@@ -16,6 +16,8 @@
 #define TMP_SFO_PATH DATA_PATH "/tmp_pkg.sfo"
 #define PKG_INSTALL_HISTORY_PATH DATA_PATH "/pkg_install_history.json"
 #define BG_DOWNLOAD_HISTORY_PATH DATA_PATH "/bg_download_history.json"
+#define BG_EXTRACT_HISTORY_PATH DATA_PATH "/bg_extract_history.json"
+#define BG_FILEOP_HISTORY_PATH DATA_PATH "/bg_fileop_history.json"
 #define DEBUG_SERVER_LOG_PATH DATA_PATH "/ezremote_server.log"
 #define NOTIFY_ICON_FILE "/user" DATA_PATH "/sce_sys/icon0.png"
 #define CLIENT_ELF_PATH DATA_PATH "/ezremote_client.elf"
@@ -61,11 +63,33 @@ struct BgDownloadData {
     std::string src_path;
     std::string dest_path;
     uint64_t bytes_transfered;
+    uint64_t completed_bytes;
     uint64_t file_size;
     DownloadState state;
     std::string fail_reason;
     uint64_t id;
     uint64_t timestamp;
+    uint64_t finished_timestamp = 0;
+    int retry_count = 0;
+    bool cancel_requested = false;
+    bool is_dir = false;
+    std::vector<std::string> active_files;
+};
+
+struct BgExtractData {
+    HostInfo host_info;
+    std::string src_path;
+    std::string dest_path;
+    std::string folder_name;
+    uint64_t bytes_transfered;
+    uint64_t file_size;
+    ExtractState state;
+    std::string fail_reason;
+    uint64_t id;
+    uint64_t timestamp;
+    uint64_t finished_timestamp = 0;
+    int retry_count = 0;
+    bool cancel_requested = false;
 };
 
 extern uint64_t *g_bytes_transfered;
@@ -101,6 +125,8 @@ extern char realdebrid_api_key[64];
 extern char CACERT_FILE[256];
 extern bool show_hidden_files;
 extern std::list<BgDownloadData> bg_download_list;
+extern std::list<BgExtractData> bg_extract_list;
+extern std::list<BgFileOpData> bg_fileop_list;
 
 namespace CONFIG
 {
@@ -114,6 +140,18 @@ namespace CONFIG
     void SaveBgDownloadData();
     void LockDownloadList();
     void UnlockDownloadList();
+
+    void AddBgExtractData(BgExtractData bg_extract_data);
+    void LoadBgExtractData();
+    void SaveBgExtractData();
+    void LockExtractList();
+    void UnlockExtractList();
+
+    void AddBgFileOpData(BgFileOpData bg_fileop_data);
+    void LoadBgFileOpData();
+    void SaveBgFileOpData();
+    void LockFileOpList();
+    void UnlockFileOpList();
 }
 #endif
 extern int sites[256];

@@ -467,9 +467,9 @@ namespace FS
         return out;
     }
 
-    int RmRecursive(const std::string &path)
+    int RmRecursive(const std::string &path, bool* cancel_flag)
     {
-        if (stop_activity)
+        if (stop_activity || (cancel_flag && *cancel_flag))
             return 1;
 
         DIR *dfd = opendir(path.c_str());
@@ -489,7 +489,7 @@ namespace FS
 
                 if (dir->d_type & DT_DIR)
                 {
-                    int ret = RmRecursive(new_path);
+                    int ret = RmRecursive(new_path, cancel_flag);
                     if (ret <= 0)
                     {
                         sprintf(status_message, "%s %s", lang_strings[STR_FAIL_DEL_DIR_MSG], new_path);
@@ -508,11 +508,11 @@ namespace FS
                         return ret;
                     }
                 }
-            } while (dir != NULL && !stop_activity);
+            } while (dir != NULL && !stop_activity && !(cancel_flag && *cancel_flag));
 
             closedir(dfd);
 
-            if (stop_activity)
+            if (stop_activity || (cancel_flag && *cancel_flag))
                 return 0;
 
             int ret = rmdir(path.c_str());
@@ -560,7 +560,7 @@ namespace FS
         return 1;
     }
 
-    bool Copy(const std::string &from, const std::string &to)
+    bool Copy(const std::string &from, const std::string &to, bool* cancel_flag)
     {
         MkDirs(to, true);
         if (from.compare(to) == 0)
@@ -597,7 +597,12 @@ namespace FS
         do
         {
             bytes_read = fread(buf, sizeof(unsigned char), buf_size, src);
-            if (bytes_read < 0)
+            if (bytes_read == 0)
+            {
+                break;
+            }
+
+            if (cancel_flag && *cancel_flag)
             {
                 delete[] buf;
                 fclose(src);
@@ -623,7 +628,7 @@ namespace FS
         return true;
     }
 
-    bool Move(const std::string &from, const std::string &to)
+    bool Move(const std::string &from, const std::string &to, bool* cancel_flag)
     {
         if (from.compare(to) == 0)
             return true;
@@ -632,7 +637,7 @@ namespace FS
         int ret = rename(from.c_str(), to.c_str());
         if (ret != 0 && (errno == EXDEV || errno == EEXIST))
         {
-            bool res = Copy(from, to);
+            bool res = Copy(from, to, cancel_flag);
             if (res)
                 Rm(from);
             else

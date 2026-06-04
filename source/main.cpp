@@ -22,9 +22,14 @@ int main(int argc, char *argv[])
 
     CONFIG::LoadPackageInstallHostData();
     CONFIG::LoadBgDownloadData();
+    CONFIG::LoadBgExtractData();
+    CONFIG::LoadBgFileOpData();
     DpiUseCase::Initialize();
     LegacyDpiServer::Start();
+
     HttpServer::StartDownloadThread();
+    HttpServer::StartExtractThread();
+    HttpServer::StartFileOpThread();
     HttpServer::Start();
     LegacyDpiServer::Stop();
     Util::Notify("ezRemote Server stopped.");

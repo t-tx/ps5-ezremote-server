@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <string>
 #include <cstdio>
 #include <cerrno>
@@ -8,17 +9,22 @@
 #include <mutex>
 #include <vector>
 #include <fstream>
+#include <cstring>
 #include <iomanip>
+#include <thread>
+#include <atomic>
 #include <sstream>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
 #include <sys/user.h>
 #include <unistd.h>
+#include <sys/statvfs.h>
 #include <json-c/json.h>
 #include "http/httplib.h"
-#include "server/http_server.h"
+#include "ps5_api/fs.h"
 #include "clients/remote_client.h"
+#include "wrapper/zip_util.h"
 #include "clients/archiveorg.h"
 #include "clients/baseclient.h"
 #include "clients/ftpclient.h"
@@ -26,6 +32,13 @@
 #include "clients/smbclient.h"
 #include "clients/sftpclient.h"
 #include "clients/webdav.h"
+#include "clients/apache.h"
+#include "clients/iis.h"
+#include "clients/nginx.h"
+#include "clients/npxserve.h"
+#include "clients/rclone.h"
+#include "clients/github.h"
+#include "clients/myrient.h"
 #include "config.h"
 #include "ps5_api/fs.h"
 #include "util.h"
@@ -46,6 +59,10 @@ int http_server_port = 6701;
 static pthread_t bg_download_thread;
 static std::atomic<bool> bg_download_running{false};
 static bool bg_download_thread_started = false;
+
+static pthread_t bg_extract_thread;
+static std::atomic<bool> bg_extract_running{false};
+static bool bg_extract_thread_started = false;
 static uint64_t g_dl_offset;
 
 namespace HttpServer
@@ -55,9 +72,21 @@ namespace HttpServer
         return 1;
     }
 
+    struct FtpDownloadProgress {
+        uint64_t* bytes_transfered;
+        uint64_t offset;
+        bool* cancel_flag;
+    };
+
     static int DownloadFtpCallback(int64_t xfered, void *arg)
     {
-        *g_bytes_transfered = g_dl_offset + xfered;
+        FtpDownloadProgress* prog = (FtpDownloadProgress*)arg;
+        if (prog && prog->bytes_transfered) {
+            *(prog->bytes_transfered) = prog->offset + xfered;
+        }
+        if (prog && prog->cancel_flag && *(prog->cancel_flag)) {
+            return 0; // Abort download
+        }
         return 1;
     }
 
@@ -138,6 +167,13 @@ namespace HttpServer
         res.set_content(SUCCESS_MSG, SUCCESS_MSG_LEN, "application/json");
         return;
     }
+    
+    void set_cors_header(httplib::Response &res)
+    {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE");
+        res.set_header("Access-Control-Allow-Headers", "Content-Type, Accept, Origin, Referer, User-Agent, Connection, Cache-Control, Pragma, Accept-Language");
+    }
 
     static RemoteClient *GetRemoteClient(HostInfo *host_info)
     {
@@ -148,14 +184,24 @@ namespace HttpServer
 
         if (host_info->type == CLIENT_TYPE_HTTP_SERVER)
         {
-            if (host_info->http_server_type.compare(HTTP_SERVER_ARCHIVEORG) == 0)
-            {
+            if (host_info->http_server_type.compare(HTTP_SERVER_APACHE) == 0)
+                tmp_client = new ApacheClient();
+            else if (host_info->http_server_type.compare(HTTP_SERVER_MS_IIS) == 0)
+                tmp_client = new IISClient();
+            else if (host_info->http_server_type.compare(HTTP_SERVER_NGINX) == 0)
+                tmp_client = new NginxClient();
+            else if (host_info->http_server_type.compare(HTTP_SERVER_NPX_SERVE) == 0)
+                tmp_client = new NpxServeClient();
+            else if (host_info->http_server_type.compare(HTTP_SERVER_RCLONE) == 0)
+                tmp_client = new RCloneClient();
+            else if (host_info->http_server_type.compare(HTTP_SERVER_ARCHIVEORG) == 0)
                 tmp_client = new ArchiveOrgClient();
-            }
+            else if (host_info->http_server_type.compare(HTTP_SERVER_GITHUB) == 0)
+                tmp_client = new GithubClient();
+            else if (host_info->http_server_type.compare(HTTP_SERVER_MYRIENT) == 0)
+                tmp_client = new MyrientClient();
             else
-            {
                 tmp_client = new BaseClient();
-            }
         }
         else if (host_info->type == CLIENT_TYPE_SMB)
         {
@@ -455,144 +501,668 @@ namespace HttpServer
         return payload.str();
     }
 
-    void *DownloadFilesThread(void *argp)
+    struct DownloadThreadArgs {
+        uint64_t id;
+    };
+
+    struct FileToDownload {
+        std::string src_path;
+        std::string dest_path;
+        uint64_t size;
+    };
+
+    static void BuildDownloadList(RemoteClient* client, const std::string& src_dir, const std::string& dest_dir, std::vector<FileToDownload>& list, uint64_t& total_size, BgDownloadData* active_dl) {
+        if (active_dl && active_dl->cancel_requested) return;
+        dbglogger_log("[BuildDownloadList] Listing %s", src_dir.c_str());
+        std::vector<DirEntry> entries = client->ListDir(src_dir.c_str());
+        dbglogger_log("[BuildDownloadList] Found %zu entries in %s. Last response: %s", entries.size(), src_dir.c_str(), client->LastResponse());
+        FS::MkDirs(dest_dir.c_str());
+        for (const auto& entry : entries) {
+            if (active_dl && active_dl->cancel_requested) return;
+            if (entry.isDir && strcmp(entry.name, "..") == 0) continue;
+            std::string new_dest = dest_dir + "/" + entry.name;
+            if (entry.isDir) {
+                BuildDownloadList(client, entry.path, new_dest, list, total_size, active_dl);
+            } else {
+                dbglogger_log("[BuildDownloadList] Adding file %s (size %lu)", entry.path, entry.file_size);
+                list.push_back({entry.path, new_dest, entry.file_size});
+                total_size += entry.file_size;
+            }
+        }
+    }
+
+
+    void *DownloadSingleFileThread(void *argp)
     {
+        pthread_detach(pthread_self());
+        DownloadThreadArgs *args = static_cast<DownloadThreadArgs *>(argp);
+        uint64_t id = args->id;
+        delete args;
+
         char temp_file[2049];
         uint64_t tmp_file_size;
         int ret;
+        BgDownloadData* active_dl = nullptr;
 
+        CONFIG::LockDownloadList();
+        for (auto it = bg_download_list.begin(); it != bg_download_list.end(); ++it)
+        {
+            if (it->id == id)
+            {
+                active_dl = &(*it);
+                break;
+            }
+        }
+        CONFIG::UnlockDownloadList();
+
+        if (active_dl == nullptr) return nullptr;
+
+        RemoteClient *tmp_client = GetRemoteClient(&(active_dl->host_info));
+        if (tmp_client == nullptr)
+        {
+            CONFIG::LockDownloadList();
+            active_dl->state = STATE_FAILED;
+            active_dl->fail_reason = "Failed to connect to host";
+            active_dl->finished_timestamp = Util::GetTick();
+            CONFIG::UnlockDownloadList();
+            CONFIG::SaveBgDownloadData();
+            Util::RichNotify(active_dl->id, "Failed to connect for download %s", active_dl->dest_path.c_str());
+            return nullptr;
+        }
+
+        FtpDownloadProgress progress_struct;
+        progress_struct.bytes_transfered = &(active_dl->bytes_transfered);
+        progress_struct.offset = 0;
+        progress_struct.cancel_flag = &(active_dl->cancel_requested);
+
+        if (active_dl->is_dir) {
+            std::vector<FileToDownload> files;
+            uint64_t total_size = 0;
+            
+            BuildDownloadList(tmp_client, active_dl->src_path, active_dl->dest_path, files, total_size, active_dl);
+            dbglogger_log("[DownloadSingleFileThread] Folder traversal complete. Files to download: %zu. Total size: %lu", files.size(), total_size);
+
+            uint64_t new_completed_bytes = 0;
+            for (const auto& file : files) {
+                if (FS::FileExists(file.dest_path.c_str())) {
+                    new_completed_bytes += file.size;
+                }
+            }
+
+            size_t num_threads = std::min((size_t)10, files.size());
+            
+            CONFIG::LockDownloadList();
+            if (total_size > 0) {
+                active_dl->file_size = total_size;
+            }
+            active_dl->completed_bytes = new_completed_bytes;
+            active_dl->active_files.assign(num_threads, "");
+            CONFIG::UnlockDownloadList();
+
+            std::atomic<bool> failed(false);
+            std::atomic<size_t> current_file_idx(0);
+            
+            std::vector<uint64_t> thread_progress(num_threads, 0);
+            std::vector<std::thread> workers;
+            std::atomic<int> active_threads(num_threads);
+
+            for (size_t t = 0; t < num_threads; ++t) {
+                workers.emplace_back([&, t]() {
+                    RemoteClient *worker_client = GetRemoteClient(&(active_dl->host_info));
+                    if (!worker_client) {
+                        failed = true;
+                        active_threads--;
+                        return;
+                    }
+
+                    FtpDownloadProgress progress_struct;
+                    progress_struct.bytes_transfered = &thread_progress[t];
+                    progress_struct.offset = 0;
+                    progress_struct.cancel_flag = &(active_dl->cancel_requested);
+
+                    if (active_dl->host_info.type == CLIENT_TYPE_FTP) {
+                        FtpClient *ftpclient = (FtpClient*)worker_client;
+                        ftpclient->SetCallbackBytes(1);
+                        ftpclient->SetCallbackArg(&progress_struct);
+                        ftpclient->SetCallbackXferFunction(DownloadFtpCallback);
+                    }
+
+                    while (!failed && !active_dl->cancel_requested) {
+                        size_t idx = current_file_idx.fetch_add(1);
+                        if (idx >= files.size()) break;
+
+                        const auto& file = files[idx];
+                        if (FS::FileExists(file.dest_path.c_str())) {
+                            // File already completed in a previous run
+                            continue;
+                        }
+                        
+                        char temp_file[1024];
+                        snprintf(temp_file, sizeof(temp_file), "%s.tmp", file.dest_path.c_str());
+
+                        CONFIG::LockDownloadList();
+                        if (t < active_dl->active_files.size()) {
+                            active_dl->active_files[t] = file.src_path;
+                        }
+                        CONFIG::UnlockDownloadList();
+                        
+                        dbglogger_log("[DownloadSingleFileThread] Thread %zu downloading %s to %s", t, file.src_path.c_str(), temp_file);
+                        
+                        bool is_resume = FS::FileExists(temp_file);
+                        uint64_t tmp_file_size = is_resume ? FS::GetSize(temp_file) : 0;
+                        progress_struct.offset = tmp_file_size;
+                        
+                        int ret = worker_client->Get(temp_file, file.src_path, tmp_file_size);
+                        
+                        if (ret == 0) {
+                            failed = true;
+                            dbglogger_log("[DownloadSingleFileThread] File download failed: %s", file.src_path.c_str());
+                            break;
+                        }
+                        
+                        if (!CompleteDownloadedFile(temp_file, file.dest_path, file.size)) {
+                            failed = true;
+                            dbglogger_log("[DownloadSingleFileThread] CompleteDownloadedFile failed for %s", temp_file);
+                            break;
+                        }
+
+                        CONFIG::LockDownloadList();
+                        active_dl->completed_bytes += file.size;
+                        if (t < active_dl->active_files.size()) {
+                            active_dl->active_files[t] = "";
+                        }
+                        CONFIG::UnlockDownloadList();
+                        thread_progress[t] = 0; // reset for next file
+                    }
+
+                    CONFIG::LockDownloadList();
+                    if (t < active_dl->active_files.size()) {
+                        active_dl->active_files[t] = "";
+                    }
+                    CONFIG::UnlockDownloadList();
+                    delete worker_client;
+                    active_threads--;
+                });
+            }
+
+            while (active_threads > 0) {
+                uint64_t current_transfer = 0;
+                for (size_t t = 0; t < num_threads; ++t) {
+                    current_transfer += thread_progress[t];
+                }
+                CONFIG::LockDownloadList();
+                active_dl->bytes_transfered = current_transfer;
+                CONFIG::UnlockDownloadList();
+                usleep(100000); // 100ms
+            }
+
+            for (auto& w : workers) {
+                if (w.joinable()) {
+                    w.join();
+                }
+            }
+
+            CONFIG::LockDownloadList();
+            if (active_dl->cancel_requested) {
+                active_dl->state = STATE_FAILED;
+                active_dl->fail_reason = "Cancelled by user";
+                Util::RichNotify(active_dl->id, "Cancelled download %s", active_dl->dest_path.c_str());
+            }
+            else if (failed) {
+                active_dl->state = STATE_FAILED;
+                active_dl->fail_reason = "Failed to download some files";
+                Util::RichNotify(active_dl->id, "Failed to download folder %s", active_dl->dest_path.c_str());
+                FS::RmRecursive(active_dl->dest_path);
+            }
+            else {
+                active_dl->state = STATE_SUCCESS;
+                Util::RichNotify(active_dl->id, "Completed folder download %s", active_dl->dest_path.c_str());
+            }
+            active_dl->active_files.clear();
+            active_dl->finished_timestamp = Util::GetTick();
+            CONFIG::UnlockDownloadList();
+        } else {
+            CONFIG::LockDownloadList();
+            active_dl->active_files.assign(1, active_dl->src_path);
+            CONFIG::UnlockDownloadList();
+
+            if (active_dl->host_info.type == CLIENT_TYPE_FTP)
+            {
+                FtpClient *ftpclient = (FtpClient*)tmp_client;
+                ftpclient->SetCallbackBytes(1);
+                ftpclient->SetCallbackArg(&progress_struct);
+                ftpclient->SetCallbackXferFunction(DownloadFtpCallback);
+            }
+
+            snprintf(temp_file, sizeof(temp_file), "%s.tmp", active_dl->dest_path.c_str());
+
+            bool is_resume = FS::FileExists(temp_file);
+            if (is_resume)
+            {
+                tmp_file_size = FS::GetSize(temp_file);
+                progress_struct.offset = tmp_file_size;
+                Util::RichNotify(active_dl->id, "Resuming download %s", active_dl->dest_path.c_str());
+                ret = tmp_client->Get(temp_file, active_dl->src_path, tmp_file_size);
+            }
+            else
+            {
+                Util::RichNotify(active_dl->id, "Started download %s", active_dl->dest_path.c_str());
+                ret = tmp_client->Get(temp_file, active_dl->src_path);
+            }
+
+            CONFIG::LockDownloadList();
+            active_dl->active_files.clear();
+            if (active_dl->cancel_requested)
+            {
+                active_dl->state = STATE_FAILED;
+                active_dl->fail_reason = "Cancelled by user";
+                Util::RichNotify(active_dl->id, "Cancelled download %s", active_dl->dest_path.c_str());
+                dbglogger_log("[Download Task] Cancelled task ID %lu", active_dl->id);
+            }
+            else if (ret == 0 || !CompleteDownloadedFile(temp_file, active_dl->dest_path, active_dl->file_size))
+            {
+                active_dl->state = STATE_FAILED;
+                active_dl->fail_reason = "Failed to download or write file";
+                Util::RichNotify(active_dl->id, "Failed to download %s", active_dl->dest_path.c_str());
+                dbglogger_log("[Download Task] Failed task ID %lu", active_dl->id);
+            }
+            else
+            {
+                Util::RichNotify(active_dl->id, "Completed download %s", active_dl->dest_path.c_str());
+                active_dl->state = STATE_SUCCESS;
+                dbglogger_log("[Download Task] Completed task ID %lu", active_dl->id);
+            }
+            active_dl->finished_timestamp = Util::GetTick();
+            CONFIG::UnlockDownloadList();
+        }
+
+        CONFIG::SaveBgDownloadData();
+
+        DeleteRemoteClient(tmp_client);
+        return nullptr;
+    }
+
+    void *DownloadFilesThread(void *argp)
+    {
+        dbglogger_log("[DownloadFilesThread] Started");
         while (bg_download_running.load())
         {
-            BgDownloadData* active_dl = nullptr;
+            std::vector<uint64_t> pending_jobs;
+            int current_downloading = 0;
+            const int MAX_CONCURRENT_DOWNLOADS = 1;
 
             CONFIG::LockDownloadList();
             for (auto it = bg_download_list.begin(); it != bg_download_list.end(); ++it)
             {
-                if (it->state == STATE_PENDING || it->state == STATE_DOWNLOADING || it->state == STATE_RESUMED)
+                if (it->state == STATE_DOWNLOADING)
                 {
-                    active_dl = &(*it);
-                    break;
+                    current_downloading++;
+                }
+            }
+
+            for (auto it = bg_download_list.begin(); it != bg_download_list.end(); ++it)
+            {
+                if (it->state == STATE_PENDING || it->state == STATE_RESUMED)
+                {
+                    if (current_downloading < MAX_CONCURRENT_DOWNLOADS)
+                    {
+                        it->state = STATE_DOWNLOADING;
+                        pending_jobs.push_back(it->id);
+                        current_downloading++;
+                    }
                 }
             }
             CONFIG::UnlockDownloadList();
 
-            if (active_dl != nullptr)
+            for (uint64_t id : pending_jobs)
             {
-                if (active_dl->state == STATE_PENDING)
-                {
-                    RemoteClient *tmp_client = GetRemoteClient(&(active_dl->host_info));
-                    if (tmp_client == nullptr)
-                    {
-                        CONFIG::LockDownloadList();
-                        active_dl->state = STATE_FAILED;
-                        active_dl->fail_reason = "Failed to connect to host";
-                        CONFIG::UnlockDownloadList();
-                        CONFIG::SaveBgDownloadData();
-                        Util::RichNotify(active_dl->id, "Failed to connect for download %s", active_dl->dest_path.c_str());
-                        continue;
-                    }
-
-                    g_bytes_transfered = &(active_dl->bytes_transfered);
-                    if (active_dl->host_info.type == CLIENT_TYPE_FTP)
-                    {
-                        FtpClient *ftpclient = (FtpClient*)tmp_client;
-                        g_dl_offset = 0;
-                        ftpclient->SetCallbackBytes(1);
-                        ftpclient->SetCallbackXferFunction(DownloadFtpCallback);
-                    }
-
-                    CONFIG::LockDownloadList();
-                    active_dl->state = STATE_DOWNLOADING;
-                    CONFIG::UnlockDownloadList();
-                    CONFIG::SaveBgDownloadData();
-
-                    snprintf(temp_file, sizeof(temp_file), "%s.tmp", active_dl->dest_path.c_str());
-                    Util::RichNotify(active_dl->id, "Started download %s", active_dl->dest_path.c_str());
-
-                    ret = tmp_client->Get(temp_file, active_dl->src_path);
-
-                    CONFIG::LockDownloadList();
-                    if (ret == 0 || !CompleteDownloadedFile(temp_file, active_dl->dest_path, active_dl->file_size))
-                    {
-                        active_dl->state = STATE_FAILED;
-                        active_dl->fail_reason = "Failed to download or write file";
-                        Util::RichNotify(active_dl->id, "Failed to download %s", active_dl->dest_path.c_str());
-                    }
-                    else
-                    {
-                        Util::RichNotify(active_dl->id, "Completed download %s", active_dl->dest_path.c_str());
-                        active_dl->state = STATE_SUCCESS;
-                    }
-                    CONFIG::UnlockDownloadList();
-                    CONFIG::SaveBgDownloadData();
-
-                    DeleteRemoteClient(tmp_client);
-                }
-                else if (active_dl->state == STATE_DOWNLOADING || active_dl->state == STATE_RESUMED)
-                {
-                    // Resume interrupted download
-                    RemoteClient *tmp_client = GetRemoteClient(&(active_dl->host_info));
-                    if (tmp_client == nullptr)
-                    {
-                        CONFIG::LockDownloadList();
-                        active_dl->state = STATE_FAILED;
-                        active_dl->fail_reason = "Failed to reconnect to host";
-                        CONFIG::UnlockDownloadList();
-                        CONFIG::SaveBgDownloadData();
-                        Util::RichNotify(active_dl->id, "Failed to reconnect for download %s", active_dl->dest_path.c_str());
-                        continue;
-                    }
-
-                    g_bytes_transfered = &(active_dl->bytes_transfered);
-                    if (active_dl->host_info.type == CLIENT_TYPE_FTP)
-                    {
-                        FtpClient *ftpclient = (FtpClient*)tmp_client;
-                        ftpclient->SetCallbackBytes(1);
-                        ftpclient->SetCallbackXferFunction(DownloadFtpCallback);
-                    }
-
-                    CONFIG::LockDownloadList();
-                    active_dl->state = STATE_RESUMED;
-                    CONFIG::UnlockDownloadList();
-
-                    snprintf(temp_file, sizeof(temp_file), "%s.tmp", active_dl->dest_path.c_str());
-                    // Check if temp file still exists, if exists then resume download
-                    Util::RichNotify(active_dl->id, "Resuming download %s", active_dl->dest_path.c_str());
-                    if (FS::FileExists(temp_file))
-                    {
-                        tmp_file_size = FS::GetSize(temp_file);
-                        g_dl_offset = tmp_file_size;
-                        ret = tmp_client->Get(temp_file, active_dl->src_path, tmp_file_size);
-                    }
-                    else
-                    {
-                        g_dl_offset = 0;
-                        ret = tmp_client->Get(temp_file, active_dl->src_path);
-                    }
-
-                    CONFIG::LockDownloadList();
-                    if (ret == 0 || !CompleteDownloadedFile(temp_file, active_dl->dest_path, active_dl->file_size))
-                    {
-                        active_dl->state = STATE_FAILED;
-                        active_dl->fail_reason = "Failed to download or write file";
-                        Util::RichNotify(active_dl->id, "Failed to download %s", active_dl->dest_path.c_str());
-                    }
-                    else
-                    {
-                        Util::RichNotify(active_dl->id, "Completed download %s", active_dl->dest_path.c_str());
-                        active_dl->state = STATE_SUCCESS;
-                    }
-                    CONFIG::UnlockDownloadList();
-                    CONFIG::SaveBgDownloadData();
-
-                    DeleteRemoteClient(tmp_client);
-                }
+                DownloadThreadArgs *args = new DownloadThreadArgs();
+                args->id = id;
+                pthread_t thread;
+                pthread_create(&thread, NULL, DownloadSingleFileThread, args);
             }
 
             sleep(1);
         }
 
         return nullptr;
+    }
+
+    struct ExtractThreadArgs {
+        uint64_t id;
+    };
+
+    static std::string ExtractBaseName(const std::string &path)
+    {
+        size_t end = path.find_last_not_of('/');
+        if (end == std::string::npos) return "extract";
+        size_t slash = path.find_last_of('/', end);
+        if (slash == std::string::npos) return path.substr(0, end + 1);
+        return path.substr(slash + 1, end - slash);
+    }
+
+    void *ExtractSingleFileThread(void *argp)
+    {
+        pthread_detach(pthread_self());
+        ExtractThreadArgs *args = static_cast<ExtractThreadArgs *>(argp);
+        uint64_t id = args->id;
+        delete args;
+
+        BgExtractData* active_ext = nullptr;
+
+        CONFIG::LockExtractList();
+        for (auto it = bg_extract_list.begin(); it != bg_extract_list.end(); ++it)
+        {
+            if (it->id == id)
+            {
+                active_ext = &(*it);
+                break;
+            }
+        }
+        CONFIG::UnlockExtractList();
+
+        if (active_ext == nullptr) return nullptr;
+
+        DirEntry entry;
+        memset(&entry, 0, sizeof(entry));
+        snprintf(entry.name, sizeof(entry.name), "%s", ExtractBaseName(active_ext->src_path).c_str());
+        snprintf(entry.path, sizeof(entry.path), "%s", active_ext->src_path.c_str());
+        entry.isDir = false;
+
+        if (FS::FileExists(active_ext->dest_path + "/" + active_ext->folder_name) || FS::FolderExists(active_ext->dest_path + "/" + active_ext->folder_name))
+        {
+            CONFIG::LockExtractList();
+            active_ext->state = EXTRACT_STATE_FAILED;
+            active_ext->fail_reason = "Destination already exists";
+            active_ext->finished_timestamp = Util::GetTick();
+            CONFIG::UnlockExtractList();
+            CONFIG::SaveBgExtractData();
+            Util::RichNotify(active_ext->id, "Extraction failed: Destination exists");
+            return nullptr;
+        }
+
+        std::string staging_path = active_ext->dest_path + "/.extract_" + std::to_string(id);
+        std::string final_path = active_ext->dest_path + "/" + active_ext->folder_name;
+
+        FS::MkDirs(staging_path);
+
+        RemoteClient *tmp_client = nullptr;
+        int ret = 0;
+        
+        if (active_ext->host_info.type != 0 && active_ext->host_info.url.length() > 0)
+        {
+            tmp_client = GetRemoteClient(&(active_ext->host_info));
+            if (tmp_client == nullptr || !tmp_client->IsConnected())
+            {
+                if (tmp_client) DeleteRemoteClient(tmp_client);
+                CONFIG::LockExtractList();
+                active_ext->state = EXTRACT_STATE_FAILED;
+                active_ext->fail_reason = "Failed to connect to remote site";
+                active_ext->finished_timestamp = Util::GetTick();
+                CONFIG::UnlockExtractList();
+                CONFIG::SaveBgExtractData();
+                FS::RmRecursive(staging_path);
+                Util::RichNotify(active_ext->id, "Extraction failed: Cannot connect to remote host");
+                return nullptr;
+            }
+            dbglogger_log("[Extract Task] Starting remote extraction for task ID %lu: %s", id, entry.name);
+            ret = ZipUtil::Extract(entry, staging_path, tmp_client, &(active_ext->cancel_requested));
+            DeleteRemoteClient(tmp_client);
+        }
+        else
+        {
+            dbglogger_log("[Extract Task] Starting local extraction for task ID %lu: %s", id, entry.name);
+            ret = ZipUtil::Extract(entry, staging_path, nullptr, &(active_ext->cancel_requested));
+        }
+
+        if (active_ext->cancel_requested)
+        {
+            CONFIG::LockExtractList();
+            active_ext->state = EXTRACT_STATE_FAILED;
+            active_ext->fail_reason = "Cancelled by user";
+            active_ext->finished_timestamp = Util::GetTick();
+            CONFIG::UnlockExtractList();
+            CONFIG::SaveBgExtractData();
+            FS::RmRecursive(staging_path);
+            Util::RichNotify(active_ext->id, "Cancelled extraction %s", active_ext->folder_name.c_str());
+            dbglogger_log("[Extract Task] Cancelled task ID %lu", id);
+            return nullptr;
+        }
+        else if (ret <= 0)
+        {
+            CONFIG::LockExtractList();
+            active_ext->state = EXTRACT_STATE_FAILED;
+            active_ext->fail_reason = ret == -1 ? "Unsupported compressed file format" : "Failed to extract file";
+            active_ext->finished_timestamp = Util::GetTick();
+            CONFIG::UnlockExtractList();
+            CONFIG::SaveBgExtractData();
+            FS::RmRecursive(staging_path);
+            Util::RichNotify(active_ext->id, "Failed to extract %s", active_ext->folder_name.c_str());
+            dbglogger_log("[Extract Task] Failed task ID %lu", id);
+            return nullptr;
+        }
+
+        if (FS::FolderExists(final_path) || FS::FileExists(final_path))
+        {
+            CONFIG::LockExtractList();
+            active_ext->state = EXTRACT_STATE_FAILED;
+            active_ext->fail_reason = "Destination already exists";
+            active_ext->finished_timestamp = Util::GetTick();
+            CONFIG::UnlockExtractList();
+            CONFIG::SaveBgExtractData();
+            FS::RmRecursive(staging_path);
+            Util::RichNotify(active_ext->id, "Extraction failed: Destination exists");
+            return nullptr;
+        }
+
+        FS::MkDirs(final_path, true);
+        if (rename(staging_path.c_str(), final_path.c_str()) != 0)
+        {
+            CONFIG::LockExtractList();
+            active_ext->state = EXTRACT_STATE_FAILED;
+            active_ext->fail_reason = "Failed to move extracted directory";
+            active_ext->finished_timestamp = Util::GetTick();
+            CONFIG::UnlockExtractList();
+            CONFIG::SaveBgExtractData();
+            FS::RmRecursive(staging_path);
+            Util::RichNotify(active_ext->id, "Extraction failed: Could not move directory");
+            return nullptr;
+        }
+
+        CONFIG::LockExtractList();
+        active_ext->state = EXTRACT_STATE_SUCCESS;
+        active_ext->finished_timestamp = Util::GetTick();
+        CONFIG::UnlockExtractList();
+        CONFIG::SaveBgExtractData();
+
+        Util::RichNotify(active_ext->id, "Completed extraction to %s", active_ext->folder_name.c_str());
+        dbglogger_log("[Extract Task] Completed task ID %lu", id);
+        return nullptr;
+    }
+
+    void *ExtractFilesThread(void *argp)
+    {
+        while (bg_extract_running.load())
+        {
+            std::vector<uint64_t> pending_jobs;
+            int current_extracting = 0;
+            const int MAX_CONCURRENT_EXTRACTIONS = 2;
+
+            CONFIG::LockExtractList();
+            for (auto it = bg_extract_list.begin(); it != bg_extract_list.end(); ++it)
+            {
+                if (it->state == EXTRACT_STATE_EXTRACTING)
+                {
+                    current_extracting++;
+                }
+            }
+
+            for (auto it = bg_extract_list.begin(); it != bg_extract_list.end(); ++it)
+            {
+                if (it->state == EXTRACT_STATE_PENDING)
+                {
+                    if (current_extracting < MAX_CONCURRENT_EXTRACTIONS)
+                    {
+                        it->state = EXTRACT_STATE_EXTRACTING;
+                        pending_jobs.push_back(it->id);
+                        current_extracting++;
+                    }
+                }
+            }
+            CONFIG::UnlockExtractList();
+
+            for (uint64_t id : pending_jobs)
+            {
+                ExtractThreadArgs *args = new ExtractThreadArgs();
+                args->id = id;
+                pthread_t thread;
+                pthread_create(&thread, NULL, ExtractSingleFileThread, args);
+            }
+
+            sleep(1);
+        }
+
+        return nullptr;
+    }
+
+    void StopDownloadThread();
+    void StopExtractThread();
+    
+    struct FileOpThreadArgs {
+        uint64_t id;
+    };
+
+    void *FileOpSingleThread(void *argp)
+    {
+        pthread_detach(pthread_self());
+        FileOpThreadArgs *args = (FileOpThreadArgs *)argp;
+        uint64_t op_id = args->id;
+        delete args;
+
+        BgFileOpData *active_op = nullptr;
+
+        CONFIG::LockFileOpList();
+        for (auto it = bg_fileop_list.begin(); it != bg_fileop_list.end(); ++it)
+        {
+            if (it->id == op_id)
+            {
+                active_op = &(*it);
+                break;
+            }
+        }
+        CONFIG::UnlockFileOpList();
+
+        if (!active_op)
+            return nullptr;
+
+        Util::RichNotify(active_op->id, "Started %s to %s", 
+            active_op->type == FILEOP_COPY ? "copy" : (active_op->type == FILEOP_MOVE ? "move" : "delete"), 
+            active_op->dest_path.c_str());
+
+        bool all_success = true;
+        for (const std::string& item : active_op->items)
+        {
+            if (active_op->cancel_requested)
+            {
+                all_success = false;
+                break;
+            }
+
+            if (active_op->type == FILEOP_DELETE)
+            {
+                if (FS::FolderExists(item)) FS::RmRecursive(item, &(active_op->cancel_requested));
+                else FS::Rm(item);
+            }
+            else
+            {
+                std::string basename = item.substr(item.find_last_of('/') + 1);
+                std::string target_path = active_op->dest_path + "/" + basename;
+                
+                int ret = 0;
+                if (active_op->type == FILEOP_COPY)
+                {
+                    ret = FS::Copy(item, target_path, &(active_op->cancel_requested)) ? 0 : -1;
+                }
+                else if (active_op->type == FILEOP_MOVE)
+                {
+                    if (rename(item.c_str(), target_path.c_str()) != 0) {
+                        ret = FS::Move(item, target_path, &(active_op->cancel_requested)) ? 0 : -1;
+                    }
+                }
+                
+                if (ret != 0)
+                {
+                    all_success = false;
+                    break;
+                }
+            }
+
+            CONFIG::LockFileOpList();
+            active_op->items_processed++;
+            CONFIG::UnlockFileOpList();
+        }
+
+        CONFIG::LockFileOpList();
+        if (active_op->cancel_requested) {
+            active_op->state = FILEOP_STATE_FAILED;
+            active_op->fail_reason = "Cancelled by user";
+            Util::RichNotify(active_op->id, "Cancelled %s", active_op->type == FILEOP_COPY ? "copy" : (active_op->type == FILEOP_MOVE ? "move" : "delete"));
+            dbglogger_log("[FileOp Task] Cancelled task ID %lu", op_id);
+        } else if (all_success) {
+            active_op->state = FILEOP_STATE_SUCCESS;
+            Util::RichNotify(active_op->id, "Completed %s", active_op->type == FILEOP_COPY ? "copy" : (active_op->type == FILEOP_MOVE ? "move" : "delete"));
+            dbglogger_log("[FileOp Task] Completed task ID %lu", op_id);
+        } else {
+            active_op->state = FILEOP_STATE_FAILED;
+            active_op->fail_reason = "Failed to process all items";
+            Util::RichNotify(active_op->id, "Failed %s", active_op->type == FILEOP_COPY ? "copy" : (active_op->type == FILEOP_MOVE ? "move" : "delete"));
+            dbglogger_log("[FileOp Task] Failed task ID %lu", op_id);
+        }
+        active_op->finished_timestamp = Util::GetTick();
+        CONFIG::UnlockFileOpList();
+        CONFIG::SaveBgFileOpData();
+
+        return nullptr;
+    }
+
+    std::atomic<bool> bg_fileop_running{false};
+    pthread_t fileop_thread;
+
+    void *FileOpFilesThread(void *argp)
+    {
+        while (bg_fileop_running.load())
+        {
+            std::vector<uint64_t> pending_jobs;
+
+            CONFIG::LockFileOpList();
+            for (auto it = bg_fileop_list.begin(); it != bg_fileop_list.end(); ++it)
+            {
+                if (it->state == FILEOP_STATE_PENDING)
+                {
+                    it->state = FILEOP_STATE_PROCESSING;
+                    pending_jobs.push_back(it->id);
+                }
+            }
+            CONFIG::UnlockFileOpList();
+
+            for (uint64_t id : pending_jobs)
+            {
+                FileOpThreadArgs *args = new FileOpThreadArgs();
+                args->id = id;
+                pthread_t thread;
+                pthread_create(&thread, NULL, FileOpSingleThread, args);
+            }
+
+            sleep(1);
+        }
+
+        return nullptr;
+    }
+
+    void StartFileOpThread()
+    {
+        bg_fileop_running.store(true);
+        pthread_create(&fileop_thread, NULL, FileOpFilesThread, NULL);
     }
 
     void *ServerThread(void *argp)
@@ -808,6 +1378,7 @@ namespace HttpServer
             const char *dest_path_param;
             uint64_t file_size_param;
             uint64_t id_param;
+            bool is_dir_param = false;
 
             json_object *jobj = json_tokener_parse(req.body.c_str());
             if (jobj != nullptr)
@@ -821,8 +1392,10 @@ namespace HttpServer
                 dest_path_param = json_object_get_string(json_object_object_get(jobj, "dest_path"));
                 json_object *file_size_obj = json_object_object_get(jobj, "size");
                 json_object *id_obj = json_object_object_get(jobj, "id");
+                json_object *is_dir_obj = json_object_object_get(jobj, "is_dir");
                 file_size_param = file_size_obj != nullptr ? json_object_get_uint64(file_size_obj) : 0;
                 id_param = id_obj != nullptr ? json_object_get_uint64(id_obj) : Util::GetTick();
+                is_dir_param = is_dir_obj != nullptr ? json_object_get_boolean(is_dir_obj) : false;
 
                 if (url_param == nullptr || src_path_param == nullptr || dest_path_param == nullptr)
                 {
@@ -841,7 +1414,10 @@ namespace HttpServer
                 download_data.state = STATE_PENDING;
                 download_data.id = id_param;
                 download_data.bytes_transfered = 0;
+                download_data.completed_bytes = 0;
                 download_data.timestamp = Util::GetTick();
+                download_data.finished_timestamp = 0;
+                download_data.is_dir = is_dir_param;
 
                 if (username_param != nullptr)
                     download_data.host_info.username = username_param;
@@ -860,21 +1436,104 @@ namespace HttpServer
             bad_request(res, "Invalid payload");
         });
 
+        svr->Post("/extract_url", [&](const Request &req, Response &res)
+        {
+            int type_param;
+            const char *url_param;
+            const char *username_param;
+            const char *password_param;
+            const char *http_server_type_param;
+            const char *src_path_param;
+            const char *dest_path_param;
+            const char *folder_name_param;
+            uint64_t id_param;
+
+            json_object *jobj = json_tokener_parse(req.body.c_str());
+            if (jobj != nullptr)
+            {
+                type_param = json_object_get_int(json_object_object_get(jobj, "type"));
+                url_param = json_object_get_string(json_object_object_get(jobj, "url"));
+                username_param  = json_object_get_string(json_object_object_get(jobj, "username"));
+                password_param = json_object_get_string(json_object_object_get(jobj, "password"));
+                http_server_type_param = json_object_get_string(json_object_object_get(jobj, "http_server_type"));
+                src_path_param = json_object_get_string(json_object_object_get(jobj, "src_path"));
+                dest_path_param = json_object_get_string(json_object_object_get(jobj, "dest_path"));
+                folder_name_param = json_object_get_string(json_object_object_get(jobj, "folder_name"));
+                json_object *id_obj = json_object_object_get(jobj, "id");
+                id_param = id_obj != nullptr ? json_object_get_uint64(id_obj) : Util::GetTick();
+
+                if (src_path_param == nullptr || dest_path_param == nullptr || folder_name_param == nullptr)
+                {
+                    bad_request(res, "Required parameters are missing");
+                    json_object_put(jobj);
+                    return;
+                }
+
+                BgExtractData extract_data;
+                extract_data.host_info.type = type_param;
+                extract_data.host_info.url = url_param != nullptr ? url_param : "";
+                extract_data.host_info.client = nullptr;
+                extract_data.src_path = src_path_param;
+                extract_data.dest_path = dest_path_param;
+                extract_data.folder_name = folder_name_param;
+                extract_data.file_size = 0; // Not strictly tracked for extracts yet
+                extract_data.state = EXTRACT_STATE_PENDING;
+                extract_data.id = id_param;
+                extract_data.bytes_transfered = 0;
+                extract_data.timestamp = Util::GetTick();
+                extract_data.finished_timestamp = 0;
+
+                if (username_param != nullptr)
+                    extract_data.host_info.username = username_param;
+                if (password_param != nullptr)
+                    extract_data.host_info.password = password_param;
+                if (http_server_type_param != nullptr)
+                    extract_data.host_info.http_server_type = http_server_type_param;
+
+                CONFIG::AddBgExtractData(extract_data);
+                CONFIG::SaveBgExtractData();
+                success(res);
+                json_object_put(jobj);
+                return;
+            }
+
+            bad_request(res, "Invalid payload");
+        });
+
         svr->Get("/get_download_state", [&](const Request &req, Response &res)
         {
             json_object *download_list = json_object_new_array();
+            uint64_t now = Util::GetTick();
 
             CONFIG::LockDownloadList();
             for (auto it = bg_download_list.begin(); it != bg_download_list.end(); ++it)
             {
                 json_object *download_item_obj = json_object_new_object();
                 json_object_object_add(download_item_obj, "path", json_object_new_string(it->dest_path.c_str()));
-                json_object_object_add(download_item_obj, "bytes_transfered", json_object_new_uint64(it->bytes_transfered));
+                json_object_object_add(download_item_obj, "id", json_object_new_uint64(it->id));
+                json_object_object_add(download_item_obj, "retry_count", json_object_new_int(it->retry_count));
+                uint64_t total_transferred = it->bytes_transfered;
+                if (it->is_dir) {
+                    total_transferred += it->completed_bytes;
+                }
+                json_object_object_add(download_item_obj, "bytes_transfered", json_object_new_uint64(total_transferred));
                 json_object_object_add(download_item_obj, "file_size", json_object_new_uint64(it->file_size));
                 json_object_object_add(download_item_obj, "state", json_object_new_int(it->state));
                 if (it->state == STATE_FAILED)
                     json_object_object_add(download_item_obj, "fail_reason", json_object_new_string(it->fail_reason.c_str()));
                 json_object_object_add(download_item_obj, "timestamp", json_object_new_uint64(it->timestamp/1000000));
+                json_object_object_add(download_item_obj, "finished_timestamp", json_object_new_uint64(it->finished_timestamp/1000000));
+                bool terminal_state = it->state == STATE_FAILED || it->state == STATE_SUCCESS;
+                uint64_t end_time = terminal_state ? (it->finished_timestamp > 0 ? it->finished_timestamp : it->timestamp) : now;
+                json_object_object_add(download_item_obj, "elapsed_seconds", json_object_new_uint64(end_time > it->timestamp ? (end_time - it->timestamp) / 1000000 : 0));
+
+                json_object *active_files = json_object_new_array();
+                for (const auto& active_file : it->active_files) {
+                    if (!active_file.empty()) {
+                        json_object_array_add(active_files, json_object_new_string(active_file.c_str()));
+                    }
+                }
+                json_object_object_add(download_item_obj, "active_files", active_files);
                 json_object_array_add(download_list, download_item_obj);
             }
             CONFIG::UnlockDownloadList();
@@ -886,6 +1545,388 @@ namespace HttpServer
             json_object_put(download_list);
         });
 
+        svr->Get("/get_extract_state", [&](const Request &req, Response &res)
+        {
+            json_object *extract_list = json_object_new_array();
+            uint64_t now = Util::GetTick();
+
+            CONFIG::LockExtractList();
+            for (auto it = bg_extract_list.begin(); it != bg_extract_list.end(); ++it)
+            {
+                json_object *extract_item_obj = json_object_new_object();
+                json_object_object_add(extract_item_obj, "path", json_object_new_string(it->src_path.c_str()));
+                json_object_object_add(extract_item_obj, "id", json_object_new_uint64(it->id));
+                json_object_object_add(extract_item_obj, "retry_count", json_object_new_int(it->retry_count));
+                json_object_object_add(extract_item_obj, "dest_path", json_object_new_string((it->dest_path + "/" + it->folder_name).c_str()));
+                json_object_object_add(extract_item_obj, "state", json_object_new_int(it->state));
+                if (it->state == EXTRACT_STATE_FAILED)
+                    json_object_object_add(extract_item_obj, "fail_reason", json_object_new_string(it->fail_reason.c_str()));
+                json_object_object_add(extract_item_obj, "timestamp", json_object_new_uint64(it->timestamp/1000000));
+                json_object_object_add(extract_item_obj, "finished_timestamp", json_object_new_uint64(it->finished_timestamp/1000000));
+                bool terminal_state = it->state == EXTRACT_STATE_FAILED || it->state == EXTRACT_STATE_SUCCESS;
+                uint64_t end_time = terminal_state ? (it->finished_timestamp > 0 ? it->finished_timestamp : it->timestamp) : now;
+                json_object_object_add(extract_item_obj, "elapsed_seconds", json_object_new_uint64(end_time > it->timestamp ? (end_time - it->timestamp) / 1000000 : 0));
+                json_object_array_add(extract_list, extract_item_obj);
+            }
+            CONFIG::UnlockExtractList();
+            
+            const char *payload_str = json_object_to_json_string(extract_list);
+
+            res.status = 200;
+            res.set_content(payload_str, "application/json");
+            json_object_put(extract_list);
+        });
+        svr->Get("/get_fileop_state", [&](const Request &req, Response &res)
+        {
+            json_object *fileop_list = json_object_new_array();
+            uint64_t now = Util::GetTick();
+
+            CONFIG::LockFileOpList();
+            for (auto it = bg_fileop_list.begin(); it != bg_fileop_list.end(); ++it)
+            {
+                json_object *fileop_item_obj = json_object_new_object();
+                json_object_object_add(fileop_item_obj, "type", json_object_new_int(it->type));
+                json_object_object_add(fileop_item_obj, "id", json_object_new_uint64(it->id));
+                json_object_object_add(fileop_item_obj, "retry_count", json_object_new_int(it->retry_count));
+                json_object_object_add(fileop_item_obj, "dest_path", json_object_new_string(it->dest_path.c_str()));
+                json_object_object_add(fileop_item_obj, "items_processed", json_object_new_uint64(it->items_processed));
+                json_object_object_add(fileop_item_obj, "total_items", json_object_new_uint64(it->total_items));
+                json_object_object_add(fileop_item_obj, "state", json_object_new_int(it->state));
+                if (it->state == FILEOP_STATE_FAILED)
+                    json_object_object_add(fileop_item_obj, "fail_reason", json_object_new_string(it->fail_reason.c_str()));
+                json_object_object_add(fileop_item_obj, "timestamp", json_object_new_uint64(it->timestamp/1000000));
+                json_object_object_add(fileop_item_obj, "finished_timestamp", json_object_new_uint64(it->finished_timestamp/1000000));
+                bool terminal_state = it->state == FILEOP_STATE_FAILED || it->state == FILEOP_STATE_SUCCESS;
+                uint64_t end_time = terminal_state ? (it->finished_timestamp > 0 ? it->finished_timestamp : it->timestamp) : now;
+                json_object_object_add(fileop_item_obj, "elapsed_seconds", json_object_new_uint64(end_time > it->timestamp ? (end_time - it->timestamp) / 1000000 : 0));
+                
+                json_object *items_arr = json_object_new_array();
+                for (const auto& item : it->items) {
+                    json_object_array_add(items_arr, json_object_new_string(item.c_str()));
+                }
+                json_object_object_add(fileop_item_obj, "items", items_arr);
+
+                json_object_array_add(fileop_list, fileop_item_obj);
+            }
+            CONFIG::UnlockFileOpList();
+            
+            const char *payload_str = json_object_to_json_string(fileop_list);
+
+            res.status = 200;
+            res.set_content(payload_str, "application/json");
+            json_object_put(fileop_list);
+        });
+
+        svr->Post("/fileop_start", [&](const Request &req, Response &res)
+        {
+            json_object *jobj = json_tokener_parse(req.body.c_str());
+            if (jobj != nullptr)
+            {
+                int type_param = json_object_get_int(json_object_object_get(jobj, "type"));
+                const char *dest_path_param = json_object_get_string(json_object_object_get(jobj, "newPath"));
+                json_object *items_arr = json_object_object_get(jobj, "items");
+
+                if (!items_arr || json_object_get_type(items_arr) != json_type_array)
+                {
+                    bad_request(res, "Missing or invalid items array");
+                    json_object_put(jobj);
+                    return;
+                }
+
+                BgFileOpData op_data;
+                op_data.id = Util::GetTick();
+                op_data.type = static_cast<FileOpType>(type_param);
+                op_data.dest_path = dest_path_param ? dest_path_param : "";
+                op_data.state = FILEOP_STATE_PENDING;
+                op_data.items_processed = 0;
+                op_data.timestamp = Util::GetTick();
+                op_data.finished_timestamp = 0;
+
+                struct array_list *arr = json_object_get_array(items_arr);
+                op_data.total_items = arr->length;
+                for (size_t i = 0; i < arr->length; i++) {
+                    op_data.items.push_back(json_object_get_string((json_object*)array_list_get_idx(arr, i)));
+                }
+
+                CONFIG::AddBgFileOpData(op_data);
+                CONFIG::SaveBgFileOpData();
+                success(res);
+                json_object_put(jobj);
+                return;
+            }
+
+            bad_request(res, "Invalid payload");
+        });
+
+        svr->Post("/retry_task", [&](const Request &req, Response &res)
+        {
+            json_object *jobj = json_tokener_parse(req.body.c_str());
+            if (!jobj)
+            {
+                bad_request(res, "Invalid JSON");
+                return;
+            }
+
+            const char *type_param = json_object_get_string(json_object_object_get(jobj, "type"));
+            uint64_t id_param = json_object_get_uint64(json_object_object_get(jobj, "id"));
+
+            if (!type_param || id_param == 0)
+            {
+                bad_request(res, "Missing type or id");
+                json_object_put(jobj);
+                return;
+            }
+
+            std::string type = type_param;
+            bool found = false;
+
+            if (type == "download")
+            {
+                CONFIG::LockDownloadList();
+                for (auto &it : bg_download_list)
+                {
+                    if (it.id == id_param && it.state == STATE_FAILED)
+                    {
+                        it.state = STATE_RESUMED;
+                        it.retry_count = 0;
+                        it.fail_reason = "";
+                        it.finished_timestamp = 0;
+                        found = true;
+                        break;
+                    }
+                }
+                CONFIG::UnlockDownloadList();
+                if (found) CONFIG::SaveBgDownloadData();
+            }
+            else if (type == "extract")
+            {
+                CONFIG::LockExtractList();
+                for (auto &it : bg_extract_list)
+                {
+                    if (it.id == id_param && it.state == EXTRACT_STATE_FAILED)
+                    {
+                        it.state = EXTRACT_STATE_PENDING;
+                        it.retry_count = 0;
+                        it.fail_reason = "";
+                        it.bytes_transfered = 0;
+                        it.finished_timestamp = 0;
+                        std::string tmp_folder = it.dest_path + "/.extract_" + std::to_string(it.id);
+                        if (FS::FolderExists(tmp_folder)) {
+                            FS::RmRecursive(tmp_folder);
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                CONFIG::UnlockExtractList();
+                if (found) CONFIG::SaveBgExtractData();
+            }
+            else if (type == "fileop")
+            {
+                CONFIG::LockFileOpList();
+                for (auto &it : bg_fileop_list)
+                {
+                    if (it.id == id_param && it.state == FILEOP_STATE_FAILED)
+                    {
+                        it.state = FILEOP_STATE_PENDING;
+                        it.retry_count = 0;
+                        it.fail_reason = "";
+                        it.finished_timestamp = 0;
+                        found = true;
+                        break;
+                    }
+                }
+                CONFIG::UnlockFileOpList();
+                if (found) CONFIG::SaveBgFileOpData();
+            }
+
+            if (found) {
+                success(res);
+            } else {
+                bad_request(res, "Task not found or not in failed state");
+            }
+            json_object_put(jobj);
+        });
+
+
+
+        svr->Post("/clean_tasks", [&](const Request &req, Response &res)
+        {
+            CONFIG::LockDownloadList();
+            bg_download_list.remove_if([](const BgDownloadData& item) {
+                if (item.state == STATE_FAILED || item.state == STATE_SUCCESS) {
+                    if (item.state == STATE_FAILED) {
+                        std::string temp_file = item.dest_path + ".tmp";
+                        if (FS::FileExists(temp_file)) FS::Rm(temp_file);
+                    }
+                    return true;
+                }
+                return false;
+            });
+            CONFIG::UnlockDownloadList();
+            CONFIG::SaveBgDownloadData();
+
+            CONFIG::LockExtractList();
+            bg_extract_list.remove_if([](const BgExtractData& item) {
+                if (item.state == EXTRACT_STATE_FAILED || item.state == EXTRACT_STATE_SUCCESS) {
+                    if (item.state == EXTRACT_STATE_FAILED) {
+                        std::string tmp_folder = item.dest_path + "/.extract_" + std::to_string(item.id);
+                        if (FS::FolderExists(tmp_folder)) FS::RmRecursive(tmp_folder);
+                    }
+                    return true;
+                }
+                return false;
+            });
+            CONFIG::UnlockExtractList();
+            CONFIG::SaveBgExtractData();
+
+            CONFIG::LockFileOpList();
+            bg_fileop_list.remove_if([](const BgFileOpData& item) {
+                return (item.state == FILEOP_STATE_FAILED || item.state == FILEOP_STATE_SUCCESS);
+            });
+            CONFIG::UnlockFileOpList();
+            CONFIG::SaveBgFileOpData();
+
+            success(res);
+        });
+
+        svr->Post("/stop_task", [&](const Request &req, Response &res)
+        {
+            json_object *jobj = json_tokener_parse(req.body.c_str());
+            if (!jobj) { bad_request(res, "Invalid JSON"); return; }
+
+            json_object *id_obj, *type_obj;
+            if (!json_object_object_get_ex(jobj, "id", &id_obj) ||
+                !json_object_object_get_ex(jobj, "type", &type_obj))
+            {
+                json_object_put(jobj);
+                bad_request(res, "Missing id or type");
+                return;
+            }
+
+            uint64_t id_param = json_object_get_uint64(id_obj);
+            std::string type = json_object_get_string(type_obj);
+            bool found = false;
+
+            if (type == "download")
+            {
+                CONFIG::LockDownloadList();
+                for (auto &it : bg_download_list)
+                {
+                    if (it.id == id_param)
+                    {
+                        it.cancel_requested = true;
+                        if (it.state == STATE_PENDING || it.state == STATE_RESUMED) {
+                            it.state = STATE_FAILED;
+                            it.fail_reason = "Cancelled by user";
+                            it.finished_timestamp = Util::GetTick();
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                CONFIG::UnlockDownloadList();
+                if (found) CONFIG::SaveBgDownloadData();
+            }
+            else if (type == "extract")
+            {
+                CONFIG::LockExtractList();
+                for (auto &it : bg_extract_list)
+                {
+                    if (it.id == id_param)
+                    {
+                        it.cancel_requested = true;
+                        if (it.state == EXTRACT_STATE_PENDING) {
+                            it.state = EXTRACT_STATE_FAILED;
+                            it.fail_reason = "Cancelled by user";
+                            it.finished_timestamp = Util::GetTick();
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                CONFIG::UnlockExtractList();
+                if (found) CONFIG::SaveBgExtractData();
+            }
+            else if (type == "fileop")
+            {
+                CONFIG::LockFileOpList();
+                for (auto &it : bg_fileop_list)
+                {
+                    if (it.id == id_param)
+                    {
+                        it.cancel_requested = true;
+                        if (it.state == FILEOP_STATE_PENDING) {
+                            it.state = FILEOP_STATE_FAILED;
+                            it.fail_reason = "Cancelled by user";
+                            it.finished_timestamp = Util::GetTick();
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                CONFIG::UnlockFileOpList();
+                if (found) CONFIG::SaveBgFileOpData();
+            }
+
+            if (found) {
+                success(res);
+            } else {
+                bad_request(res, "Task not found");
+            }
+            json_object_put(jobj);
+        });
+
+        svr->Get("/get_destinations", [&](const Request &req, Response &res)
+        {
+            json_object *dest_list = json_object_new_array();
+            
+            auto add_dest = [&](const std::string& path) {
+                json_object *dest_obj = json_object_new_object();
+                json_object_object_add(dest_obj, "path", json_object_new_string(path.c_str()));
+                
+                struct statvfs stat;
+                if (statvfs(path.c_str(), &stat) == 0) {
+                    uint64_t free_space = (uint64_t)stat.f_bavail * (uint64_t)stat.f_frsize;
+                    uint64_t total_space = (uint64_t)stat.f_blocks * (uint64_t)stat.f_frsize;
+                    json_object_object_add(dest_obj, "free", json_object_new_uint64(free_space));
+                    json_object_object_add(dest_obj, "total", json_object_new_uint64(total_space));
+                }
+                
+                json_object_array_add(dest_list, dest_obj);
+            };
+            
+            add_dest("/data/etaHEN/games");
+
+            int err = 0;
+            std::vector<DirEntry> mnt_dirs = FS::ListDir("/mnt", &err);
+            for (const auto& entry : mnt_dirs) {
+                if (entry.isDir) {
+                    std::string name = entry.name;
+                    if (name.find("ext") == 0 || name.find("usb") == 0) {
+                        std::string path = "/mnt/" + name;
+                        int err2 = 0;
+                        std::vector<DirEntry> subdirs = FS::ListDir(path, &err2);
+                        bool is_empty = true;
+                        for (const auto& subentry : subdirs) {
+                            if (strcmp(subentry.name, ".") != 0 && strcmp(subentry.name, "..") != 0 && strcmp(subentry.name, "System Volume Information") != 0) {
+                                is_empty = false;
+                                break;
+                            }
+                        }
+                        if (!is_empty) {
+                            add_dest(path);
+                        }
+                    }
+                }
+            }
+
+            const char *payload_str = json_object_to_json_string(dest_list);
+            res.status = 200;
+            res.set_content(payload_str, "application/json");
+            json_object_put(dest_list);
+        });
+
         svr->Get("/stop", [&](const Request & /*req*/, Response & /*res*/)
         {
             svr->stop();
@@ -894,7 +1935,6 @@ namespace HttpServer
         svr->Get("/version", [&](const Request & req, Response &res)
         {
             res.status = 200;
-            res.set_header("Access-Control-Allow-Origin", "*");
             char version[20];
             sprintf(version, "%.2f", EZREMOTE_VERSION);
             res.set_content(version, "text/html");
@@ -903,7 +1943,6 @@ namespace HttpServer
         svr->Get("/mem", [&](const Request & req, Response &res)
         {
             res.status = 200;
-            res.set_header("Access-Control-Allow-Origin", "*");
             res.set_content(ProcessMemoryStatsJson(), "application/json");
         });
 
@@ -929,6 +1968,14 @@ namespace HttpServer
         svr->set_mount_point("/game-icons", "/data/homebrew/ezremote-client/game-icons");
         svr->set_mount_point("/", "/data/homebrew/ezremote-client/assets/");
 
+        svr->Options(R"(.*)", [&](const Request &req, Response &res) {
+            res.status = 200;
+        });
+
+        svr->set_post_routing_handler([](const Request &req, Response &res) {
+            set_cors_header(res);
+        });
+
         svr->listen("0.0.0.0", http_server_port);
 
         return NULL;
@@ -941,6 +1988,7 @@ namespace HttpServer
         if (!svr->is_valid())
         {
             StopDownloadThread();
+            StopExtractThread();
             delete svr;
             svr = nullptr;
             return;
@@ -949,6 +1997,7 @@ namespace HttpServer
         Util::Notify("Starting ezRemote Server %.2f on port %d", EZREMOTE_VERSION, http_server_port);
         ServerThread(nullptr);
         StopDownloadThread();
+        StopExtractThread();
 
         delete svr;
         svr = nullptr;
@@ -959,6 +2008,7 @@ namespace HttpServer
         if (svr != nullptr)
             svr->stop();
         StopDownloadThread();
+        StopExtractThread();
     }
 
     void StartDownloadThread()
@@ -985,6 +2035,32 @@ namespace HttpServer
         bg_download_running.store(false);
         pthread_join(bg_download_thread, NULL);
         bg_download_thread_started = false;
+    }
+
+    void StartExtractThread()
+    {
+        if (bg_extract_thread_started)
+            return;
+
+        bg_extract_running.store(true);
+        if (pthread_create(&bg_extract_thread, NULL, ExtractFilesThread, NULL) == 0)
+        {
+            bg_extract_thread_started = true;
+        }
+        else
+        {
+            bg_extract_running.store(false);
+        }
+    }
+
+    void StopExtractThread()
+    {
+        if (!bg_extract_thread_started)
+            return;
+
+        bg_extract_running.store(false);
+        pthread_join(bg_extract_thread, NULL);
+        bg_extract_thread_started = false;
     }
 }
 #include "usecase/pkg_install_usecase.h"

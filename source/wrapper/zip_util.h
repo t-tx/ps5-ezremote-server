@@ -50,7 +50,7 @@ struct ArchiveEntry
 namespace ZipUtil
 {
     int ZipAddPath(zipFile zf, const std::string &path, int filename_start, int level);
-    int Extract(const DirEntry &file, const std::string &dir, RemoteClient *client = nullptr);
+    int Extract(const DirEntry &file, const std::string &dir, RemoteClient *client = nullptr, bool* cancel_flag = nullptr);
     ArchiveEntry *GetPackageEntry(const std::string &zip_file, RemoteClient *client = nullptr);
     ArchiveEntry *GetNextPackageEntry(ArchiveEntry *archive_entry);
 }

@@ -19,7 +19,7 @@ namespace FS
 
     void Rm(const std::string &file);
     void RmDir(const std::string &path);
-    int RmRecursive(const std::string &path);
+    int RmRecursive(const std::string &path, bool* cancel_flag = nullptr);
 
     int64_t GetSize(const std::string &path);
 
@@ -29,9 +29,9 @@ namespace FS
 
     void Rename(const std::string &from, const std::string &to);
 
-    bool Copy(const std::string &from, const std::string &to);
+    bool Copy(const std::string &from, const std::string &to, bool* cancel_flag = nullptr);
 
-    bool Move(const std::string &from, const std::string &to);
+    bool Move(const std::string &from, const std::string &to, bool* cancel_flag = nullptr);
 
     // creates file (if it exists, truncates size to 0)
     FILE *Create(const std::string &path);
