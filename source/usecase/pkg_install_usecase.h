@@ -3,6 +3,7 @@
 #include <vector>
 #include "config.h"
 #include "clients/remote_client.h"
+#include <mutex>
 
 namespace Usecase {
 
@@ -26,6 +27,7 @@ namespace Usecase {
 
     private:
         InstallProgress current_progress;
+        std::mutex progress_mutex;
         
         static void* BackgroundInstallThread(void* arg);
     };

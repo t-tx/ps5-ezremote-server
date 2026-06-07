@@ -30,12 +30,21 @@ std::vector<DirEntry> IISClient::ListDir(const std::string &path)
             lxb_dom_collection_t *collection;
 
             document = lxb_html_document_create();
+            if (document == nullptr)
+                goto finish;
+
             status = lxb_html_document_parse(document, (lxb_char_t *)res.strBody.data(), res.strBody.size());
             if (status != LXB_STATUS_OK)
             {
                 lxb_html_document_destroy(document);
                 goto finish;
             }
+            if (document->body == nullptr)
+            {
+                lxb_html_document_destroy(document);
+                goto finish;
+            }
+
             collection = lxb_dom_collection_make(&document->dom_document, 128);
             if (collection == NULL)
             {
@@ -60,6 +69,13 @@ std::vector<DirEntry> IISClient::ListDir(const std::string &path)
             }
 
             element = lxb_dom_collection_element(collection, 0);
+            if (element == nullptr || element->node.first_child == nullptr)
+            {
+                lxb_dom_collection_destroy(collection, true);
+                lxb_html_document_destroy(document);
+                goto finish;
+            }
+
             const lxb_char_t *name;
             size_t name_len;
             std::string tmp;
@@ -79,15 +95,15 @@ std::vector<DirEntry> IISClient::ListDir(const std::string &path)
                         tmp = std::string((const char *)name, name_len);
                         if (tmp.compare("[To Parent Directory]") != 0)
                         {
-                            sprintf(entry.directory, "%s", path.c_str());
-                            sprintf(entry.name, "%s", tmp.c_str());
+                            snprintf(entry.directory, sizeof(entry.directory), "%s", path.c_str());
+                            snprintf(entry.name, sizeof(entry.name), "%s", tmp.c_str());
                             if (path.length() > 0 && path[path.length() - 1] == '/')
                             {
-                                sprintf(entry.path, "%s%s", path.c_str(), entry.name);
+                                snprintf(entry.path, sizeof(entry.path), "%s%s", path.c_str(), entry.name);
                             }
                             else
                             {
-                                sprintf(entry.path, "%s/%s", path.c_str(), entry.name);
+                                snprintf(entry.path, sizeof(entry.path), "%s/%s", path.c_str(), entry.name);
                             }
                             out.push_back(entry);
                             memset(&entry, 0, sizeof(DirEntry));

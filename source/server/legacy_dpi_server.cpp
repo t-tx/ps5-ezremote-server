@@ -51,6 +51,7 @@ namespace LegacyDpiServer {
             new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
             if (new_socket < 0) {
                 if (!is_running) break;
+                usleep(100000);
                 continue;
             }
 

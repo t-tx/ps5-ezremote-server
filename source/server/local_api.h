@@ -97,6 +97,11 @@ svr->Post("/__local__/install", [&](const Request &req, Response &res) {
         struct array_list *arr = json_object_get_array(items_arr);
         for (size_t i = 0; i < arr->length; i++) {
             const char *item = json_object_get_string((json_object *)array_list_get_idx(arr, i));
+            if (item == nullptr || item[0] == '\0') {
+                bad_request(res, "Invalid item path");
+                json_object_put(jobj);
+                return;
+            }
             INSTALLER::InstallLocalPkg(item);
         }
         success(res);
@@ -125,10 +130,12 @@ svr->Post("/__local__/getContent", [&](const Request &req, Response &res) {
             if (buf) {
                 fread(buf, 1, size, fp);
                 buf[size] = 0;
-                json_object *results = json_object_new_object();
+                dbglogger_log("[api] /api/sitelist finished generating response");
+        json_object *results = json_object_new_object();
                 json_object_object_add(results, "result", json_object_new_string(buf));
                 const char *results_str = json_object_to_json_string(results);
-                res.status = 200;
+                dbglogger_log("[api] /api/sitelist returning response");
+        res.status = 200;
                 res.set_content(results_str, strlen(results_str), "application/json");
                 json_object_put(results);
                 free(buf);
@@ -182,11 +189,13 @@ svr->Post("/__local__/check_exists", [&](const Request &req, Response &res) {
             return;
         }
         bool exists = FS::FileExists(path) || FS::FolderExists(path);
+        dbglogger_log("[api] /api/sitelist finished generating response");
         json_object *results = json_object_new_object();
         json_object *result_obj = json_object_new_object();
         json_object_object_add(result_obj, "exists", json_object_new_boolean(exists));
         json_object_object_add(results, "result", result_obj);
         const char *results_str = json_object_to_json_string(results);
+        dbglogger_log("[api] /api/sitelist returning response");
         res.status = 200;
         res.set_content(results_str, strlen(results_str), "application/json");
         json_object_put(results);
@@ -199,8 +208,11 @@ svr->Post("/__local__/check_exists", [&](const Request &req, Response &res) {
 // ---------------- SITE APIs ----------------
 
 svr->Get("/api/sites", [&](const Request &req, Response &res) {
+    dbglogger_log("[api] /api/sites called");
     json_object *json_sites = json_object_new_array();
+    dbglogger_log("[api] json_sites array created. %zu sites configured", configured_sites.size());
     for (size_t i = 0; i < configured_sites.size(); i++) {
+        dbglogger_log("[api] /api/sites processing site %zu", i);
         RemoteSettings& s = configured_sites[i];
         json_object *site = json_object_new_object();
         json_object_object_add(site, "site_idx", json_object_new_int(i));
@@ -214,12 +226,17 @@ svr->Get("/api/sites", [&](const Request &req, Response &res) {
         json_object_object_add(site, "enable_rpi", json_object_new_boolean(s.enable_rpi));
         json_object_array_add(json_sites, site);
     }
+    dbglogger_log("[api] /api/sites creating results object");
     json_object *results = json_object_new_object();
     json_object_object_add(results, "result", json_sites);
+    dbglogger_log("[api] /api/sites converting to json string");
     const char *results_str = json_object_to_json_string(results);
+    dbglogger_log("[api] /api/sites setting content");
     res.status = 200;
     res.set_content(results_str, strlen(results_str), "application/json");
+    dbglogger_log("[api] /api/sites putting results");
     json_object_put(results);
+    dbglogger_log("[api] /api/sites done");
 });
 
 svr->Post("/api/sitesave", [&](const Request &req, Response &res) {
@@ -253,12 +270,14 @@ svr->Post("/api/sitesave", [&](const Request &req, Response &res) {
         configured_sites.push_back(s);
         CONFIG::SaveConfiguredSites();
         
+        dbglogger_log("[api] /api/sitelist finished generating response");
         json_object *results = json_object_new_object();
         json_object *result_obj = json_object_new_object();
         json_object_object_add(result_obj, "site_idx", json_object_new_int(configured_sites.size() - 1));
         json_object_object_add(results, "result", result_obj);
         
         const char *results_str = json_object_to_json_string(results);
+        dbglogger_log("[api] /api/sitelist returning response");
         res.status = 200;
         res.set_content(results_str, strlen(results_str), "application/json");
         json_object_put(results);
@@ -269,17 +288,56 @@ svr->Post("/api/sitesave", [&](const Request &req, Response &res) {
 });
 
 svr->Post("/api/sitelist", [&](const Request &req, Response &res) {
+    dbglogger_log("[api] /api/sitelist called");
     json_object *jobj = json_tokener_parse(req.body.c_str());
     if (jobj != nullptr) {
-        int site_idx = json_object_get_int(json_object_object_get(jobj, "site_idx"));
+        json_object *site_idx_obj = json_object_object_get(jobj, "site_idx");
+        if (site_idx_obj == nullptr) {
+            bad_request(res, "Invalid parameters");
+            json_object_put(jobj);
+            return;
+        }
+        int site_idx = json_object_get_int(site_idx_obj);
         const char* path = json_object_get_string(json_object_object_get(jobj, "path"));
         
-        if (site_idx < 0 || site_idx >= configured_sites.size() || !path) {
+        dbglogger_log("[api] /api/sitelist parsed req, path: %s", path ? path : "null");
+        if (site_idx < 0 || site_idx >= configured_sites.size() || !path || path[0] == '\0') {
             bad_request(res, "Invalid parameters");
             json_object_put(jobj);
             return;
         }
 
+        auto normalize_list_path = [](const char *raw_path) {
+            std::vector<std::string> parts;
+            std::string input = raw_path;
+            size_t start = 0;
+
+            while (start < input.length()) {
+                while (start < input.length() && input[start] == '/') start++;
+                size_t end = input.find('/', start);
+                if (end == std::string::npos) end = input.length();
+
+                std::string part = input.substr(start, end - start);
+                if (part == "..") {
+                    if (!parts.empty()) parts.pop_back();
+                } else if (!part.empty() && part != ".") {
+                    parts.push_back(part);
+                }
+
+                start = end + 1;
+            }
+
+            std::string normalized = "/";
+            for (size_t i = 0; i < parts.size(); i++) {
+                if (i > 0) normalized += "/";
+                normalized += parts[i];
+            }
+            return normalized;
+        };
+
+        std::string list_path = normalize_list_path(path);
+
+        dbglogger_log("[api] /api/sitelist getting client for site %d", site_idx);
         RemoteClient* client = GetRemoteClientForSite(site_idx);
         if (!client) {
             failed(res, 500, "Failed to initialize client");
@@ -287,11 +345,16 @@ svr->Post("/api/sitelist", [&](const Request &req, Response &res) {
             return;
         }
         
-        std::vector<DirEntry> files = client->ListDir(path);
+        dbglogger_log("[api] /api/sitelist listing dir %s", list_path.c_str());
+        std::vector<DirEntry> files = client->ListDir(list_path);
+        dbglogger_log("[api] /api/sitelist sorting files");
         DirEntry::Sort(files);
         
+        dbglogger_log("[api] /api/sitelist generating response");
         json_object *json_files = json_object_new_array();
         for (auto& it : files) {
+            if (strcmp(it.name, ".") == 0 || strcmp(it.name, "..") == 0) continue;
+
             json_object *new_file = json_object_new_object();
             char display_date[32];
             sprintf(display_date, "%04d-%02d-%02d %02d:%02d:%02d", it.modified.year, it.modified.month, it.modified.day, it.modified.hours, it.modified.minutes, it.modified.seconds);
@@ -302,14 +365,18 @@ svr->Post("/api/sitelist", [&](const Request &req, Response &res) {
             json_object_array_add(json_files, new_file);
         }
         
+        dbglogger_log("[api] /api/sitelist finished generating response");
         json_object *results = json_object_new_object();
         json_object_object_add(results, "result", json_files);
         const char *results_str = json_object_to_json_string(results);
+        dbglogger_log("[api] /api/sitelist returning response");
         res.status = 200;
         res.set_content(results_str, strlen(results_str), "application/json");
         json_object_put(results);
         
-        delete client;
+        dbglogger_log("[api] /api/sitelist deleting client");
+        dbglogger_log("[api] /api/sitelist handler finished successfully");
+        DeleteRemoteClient(client);
     } else {
         bad_request(res, "Invalid payload");
     }
@@ -326,7 +393,8 @@ svr->Get("/__local__/uploadResumeSize", [&](const Request &req, Response &res)
             if (FS::FileExists(file_path))
                 size = FS::GetSize(file_path);
             std::string result_str = "{\"size\":" + std::to_string(size) + "}";
-            res.status = 200;
+            dbglogger_log("[api] /api/sitelist returning response");
+        res.status = 200;
             res.set_content(result_str.c_str(), result_str.length(), "application/json"); });
 
 svr->Post("/__local__/upload", [&](const Request &req, Response &res, const ContentReader &content_reader)
@@ -373,7 +441,12 @@ svr->Post("/__local__/upload", [&](const Request &req, Response &res, const Cont
                         if (destination.empty())
                             return fail_upload("Upload destination is missing.");
 
-                        new_file = destination + "/" + item.filename;
+                        std::string safe_filename = item.filename;
+                        size_t pos = safe_filename.find_last_of("/\\");
+                        if (pos != std::string::npos) {
+                            safe_filename = safe_filename.substr(pos + 1);
+                        }
+                        new_file = destination + "/" + safe_filename;
                         
                         auto open_start = std::chrono::high_resolution_clock::now();
                         if (chunk_number == static_cast<size_t>(-1) || chunk_number == 0)
@@ -460,7 +533,8 @@ svr->Post("/__local__/upload", [&](const Request &req, Response &res, const Cont
                                      "\"file_close_time_ms\": " + std::to_string(file_close_time_ms) + ", "
                                      "\"total_disk_bytes\": " + std::to_string(total_disk_bytes) + 
                                      "} }";
-            res.status = 200;
+            dbglogger_log("[api] /api/sitelist returning response");
+        res.status = 200;
             res.set_content(result_str.c_str(), result_str.length(), "application/json"); });
 
 svr->Post("/__local__/compress", [&](const Request &req, Response &res)
@@ -482,7 +556,7 @@ svr->Post("/__local__/compress", [&](const Request &req, Response &res)
                 destination = json_object_get_string(json_object_object_get(jobj, "destination"));
                 compressedFilename = json_object_get_string(json_object_object_get(jobj, "compressedFilename"));
 
-                if (items == nullptr || destination == nullptr || compressedFilename == nullptr)
+                if (items == nullptr || json_object_get_type(items) != json_type_array || destination == nullptr || compressedFilename == nullptr)
                 {
                     bad_request(res, "Required items,destination,compressedFilename parameter missing");
                     json_object_put(jobj);
@@ -497,7 +571,13 @@ svr->Post("/__local__/compress", [&](const Request &req, Response &res)
 
             if (!FS::FolderExists(destination))
                 FS::MkDirs(destination);
-            std::string zip_file = std::string(destination) + "/" + compressedFilename;
+            
+            std::string safe_compressedFilename = compressedFilename;
+            size_t pos = safe_compressedFilename.find_last_of("/\\");
+            if (pos != std::string::npos) {
+                safe_compressedFilename = safe_compressedFilename.substr(pos + 1);
+            }
+            std::string zip_file = std::string(destination) + "/" + safe_compressedFilename;
             zipFile zf = zipOpen64(zip_file.c_str(), APPEND_STATUS_CREATE);
             if (zf != NULL)
             {
@@ -505,6 +585,14 @@ svr->Post("/__local__/compress", [&](const Request &req, Response &res)
                 for (size_t i=0; i < len; i++)
                 {
                     const char *item = json_object_get_string(json_object_array_get_idx(items, i));
+                    if (item == nullptr || item[0] == '\0')
+                    {
+                        zipClose(zf, NULL);
+                        FS::Rm(zip_file);
+                        bad_request(res, "Invalid item path");
+                        json_object_put(jobj);
+                        return;
+                    }
                     std::string src = std::string(item);
                     size_t slash_pos = src.find_last_of("/");
                     int ret = ZipUtil::ZipAddPath(zf, src, (slash_pos != std::string::npos ? slash_pos + 1 : 1), Z_DEFAULT_COMPRESSION);
@@ -513,6 +601,8 @@ svr->Post("/__local__/compress", [&](const Request &req, Response &res)
                         zipClose(zf, NULL);
                         FS::Rm(zip_file);
                         failed(res, 200, "Failed to create zip");
+                        json_object_put(jobj);
+                        return;
                     }
                 }
                 zipClose(zf, NULL);
@@ -559,7 +649,7 @@ svr->Post("/__local__/extract", [&](const Request &req, Response &res)
                 return;
             }
 
-            /* ExtractQueuedResponse(res, job_id); */
+            success(res);
             json_object_put(jobj); });
 
 svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
@@ -568,10 +658,11 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
 
             json_object *site_obj = json_object_object_get(jobj, "site_idx");
             const char *item = json_object_get_string(json_object_object_get(jobj, "item"));
+            const char *destination = json_object_get_string(json_object_object_get(jobj, "destination"));
             const char *folderName = json_object_get_string(json_object_object_get(jobj, "folderName"));
-            if (site_obj == nullptr || item == nullptr)
+            if (site_obj == nullptr || item == nullptr || item[0] == '\0' || destination == nullptr || destination[0] == '\0')
             {
-                bad_request(res, "Required site_idx or item parameter missing");
+                bad_request(res, "Required parameters missing");
                 json_object_put(jobj);
                 return;
             }
@@ -579,13 +670,18 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
             uint64_t job_id = 0;
             std::string error;
             int site_idx = json_object_get_int(site_obj);
-            if (!StartExtractJob(site_idx, item, "/data", folderName != nullptr ? folderName : "", &error, &job_id))
+            if (site_idx < 0 || static_cast<size_t>(site_idx) >= configured_sites.size()) {
+                bad_request(res, "Invalid site_idx");
+                json_object_put(jobj);
+                return;
+            }
+            if (!StartExtractJob(site_idx, item, destination, folderName != nullptr ? folderName : "", &error, &job_id))
             {
                 failed(res, 200, error);
                 json_object_put(jobj);
                 return;
             }
-            /* ExtractQueuedResponse(res, job_id); */
+            success(res);
             json_object_put(jobj);
         });
 
@@ -623,6 +719,11 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
             const char* path = json_object_get_string(json_object_object_get(jobj, "path"));
             const char* dest = json_object_get_string(json_object_object_get(jobj, "destination"));
             bool isDir = json_object_get_boolean(json_object_object_get(jobj, "isDir"));
+            if (path == nullptr || path[0] == '\0' || dest == nullptr || dest[0] == '\0') {
+                bad_request(res, "Missing path or destination");
+                json_object_put(jobj);
+                return;
+            }
             
             BgDownloadData download_data;
             download_data.host_info.type = s.type;
@@ -658,12 +759,13 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
             if (!jobj) { bad_request(res, "Invalid payload"); return; }
             json_object *site_idx_obj = json_object_object_get(jobj, "site_idx");
             json_object *items = json_object_object_get(jobj, "items");
-            if (!site_idx_obj || !items) { bad_request(res, "Missing parameters"); json_object_put(jobj); return; }
+            if (!site_idx_obj || !items || json_object_get_type(items) != json_type_array) { bad_request(res, "Missing parameters"); json_object_put(jobj); return; }
             int site_idx = json_object_get_int(site_idx_obj);
             if (site_idx < 0 || site_idx >= configured_sites.size()) { failed(res, 500, "Invalid site_idx"); json_object_put(jobj); return; }
             RemoteSettings& s = configured_sites[site_idx];
             
-            RemoteClient* client = GetRemoteClientForSite(site_idx);
+            dbglogger_log("[api] /api/sitelist getting client for site %d", site_idx);
+        RemoteClient* client = GetRemoteClientForSite(site_idx);
             if (!client || !client->IsConnected()) {
                 if (client) { client->Quit(); delete client; }
                 failed(res, 500, "Connection failed"); json_object_put(jobj); return;
@@ -672,8 +774,15 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
             size_t len = json_object_array_length(items);
             if (len > 0) {
                 const char *item = json_object_get_string(json_object_array_get_idx(items, 0));
+                if (item == nullptr || item[0] == '\0') {
+                    client->Quit(); delete client;
+                    bad_request(res, "Invalid item path"); json_object_put(jobj); return;
+                }
                 std::string url = client->GetDirectUrl(item);
-                g_pkg_installer.StartRemoteInstall(client, url.c_str(), item, &s);
+                if (!g_pkg_installer.StartRemoteInstall(client, url.c_str(), item, &s)) {
+                    client->Quit(); delete client;
+                    failed(res, 500, "Already installing"); json_object_put(jobj); return;
+                }
             } else {
                 client->Quit(); delete client;
             }
@@ -689,6 +798,7 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
             if (!site_idx_obj || !path_obj) { bad_request(res, "Missing parameters"); json_object_put(jobj); return; }
             int site_idx = json_object_get_int(site_idx_obj);
             const char* path = json_object_get_string(path_obj);
+            if (path == nullptr || path[0] == '\0') { bad_request(res, "Missing path"); json_object_put(jobj); return; }
             if (site_idx < 0 || site_idx >= configured_sites.size()) { failed(res, 500, "Invalid site_idx"); json_object_put(jobj); return; }
             RemoteClient *client = GetRemoteClientForSite(site_idx);
             if (!client || !client->IsConnected()) { if (client) { client->Quit(); delete client; } failed(res, 500, "Connection failed"); json_object_put(jobj); return; }
@@ -708,6 +818,7 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
             int site_idx = json_object_get_int(site_idx_obj);
             const char* oldPath = json_object_get_string(oldPath_obj);
             const char* newPath = json_object_get_string(newPath_obj);
+            if (oldPath == nullptr || oldPath[0] == '\0' || newPath == nullptr || newPath[0] == '\0') { bad_request(res, "Missing path"); json_object_put(jobj); return; }
             if (site_idx < 0 || site_idx >= configured_sites.size()) { failed(res, 500, "Invalid site_idx"); json_object_put(jobj); return; }
             RemoteClient *client = GetRemoteClientForSite(site_idx);
             if (!client || !client->IsConnected()) { if (client) { client->Quit(); delete client; } failed(res, 500, "Connection failed"); json_object_put(jobj); return; }
@@ -731,6 +842,7 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
             size_t len = json_object_array_length(items_obj);
             for (size_t i=0; i<len; i++) {
                 const char* item = json_object_get_string(json_object_array_get_idx(items_obj, i));
+                if (item == nullptr || item[0] == '\0') { all_success = false; continue; }
                 if (client->Delete(item) == 0) {
                     if (client->Rmdir(item, true) == 0) all_success = false;
                 }
@@ -764,7 +876,7 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
                 std::string icon_path = std::string("/data/homebrew/ezremote-client/game-icons/") + title_id + ".png";
                 FS::MkDirs("/data/homebrew/ezremote-client/game-icons");
                 if (!FS::FileExists(icon_path)) {
-                    if (client) INSTALLER::ExtractRemotePkg(path, "/data/homebrew/ezremote-client/temp.sfo", icon_path);
+                    if (client) INSTALLER::ExtractRemotePkg(client, path, "/data/homebrew/ezremote-client/temp.sfo", icon_path);
                     else INSTALLER::ExtractLocalPkg(path, "/data/homebrew/ezremote-client/temp.sfo", icon_path);
                 }
                 if (FS::FileExists(icon_path)) icon_url = "/game-icons/" + title_id + ".png";
@@ -774,7 +886,8 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
             for (auto const& [key, val] : sfo_params) json_object_object_add(res_obj, key.c_str(), json_object_new_string(val.c_str()));
             if (!icon_url.empty()) json_object_object_add(res_obj, "ICON_URL", json_object_new_string(icon_url.c_str()));
             const char *res_str = json_object_to_json_string(res_obj);
-            res.status = 200;
+            dbglogger_log("[api] /api/sitelist returning response");
+        res.status = 200;
             res.set_content(res_str, strlen(res_str), "application/json");
             json_object_put(res_obj);
             json_object_put(jobj);
@@ -791,8 +904,8 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
             }
             CONFIG::UnlockExtractList();
             const char *payload_str = json_object_to_json_string(extract_list);
-            res.status = 200;
+            dbglogger_log("[api] /api/sitelist returning response");
+        res.status = 200;
             res.set_content(payload_str, strlen(payload_str), "application/json");
             json_object_put(extract_list);
         });
-

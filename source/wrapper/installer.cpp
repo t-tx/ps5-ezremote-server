@@ -391,6 +391,42 @@ namespace INSTALLER
 		return entry_count > 0 && entry_table_offset > 0 && entry_table_size > 0 && entry_table_size <= 16777216;
 	}
 
+	static bool FindPkgExtractEntries(const void *entry_table_data, size_t entry_count,
+		uint32_t &param_sfo_offset, uint32_t &param_sfo_size,
+		uint32_t &icon0_png_offset, uint32_t &icon0_png_size)
+	{
+		pkg_table_entry *entries = (pkg_table_entry *)entry_table_data;
+		for (size_t i = 0; i < entry_count; ++i)
+		{
+			uint32_t entry_offset = BE32(entries[i].offset);
+			uint32_t entry_size = BE32(entries[i].size);
+			switch (BE32(entries[i].id))
+			{
+			case PKG_ENTRY_ID_PARAM_SFO:
+				if (entry_offset > 0 && entry_size > 0 && entry_size <= 1048576)
+				{
+					param_sfo_offset = entry_offset;
+					param_sfo_size = entry_size;
+				}
+				break;
+			case PKG_ENTRY_ID_ICON0_PNG:
+				if (entry_offset > 0 && entry_size > 0 && entry_size <= 16777216)
+				{
+					icon0_png_offset = entry_offset;
+					icon0_png_size = entry_size;
+				}
+				break;
+			default:
+				break;
+			}
+
+			if (param_sfo_size > 0 && icon0_png_size > 0)
+				return true;
+		}
+
+		return param_sfo_size > 0 || icon0_png_size > 0;
+	}
+
 	static bool ReadLocalPkgSfoParams(const std::string &path, pkg_header *header, std::map<std::string, std::string> &params)
 	{
 		size_t entry_count;
@@ -619,15 +655,23 @@ namespace INSTALLER
 
 	std::string GetRemotePkgTitle(RemoteClient *client, const std::string &path, pkg_header *header)
 	{
+		if (client == nullptr || header == nullptr || path.empty())
+			return "";
+
 		if (BE32(header->pkg_magic) != PS4_PKG_MAGIC && BE32(header->pkg_magic) != PS5_PKG_MAGIC)
 		{
 			return GetPkgContentId(header);
 		}
 
-		size_t entry_count = BE32(header->pkg_entry_count);
-		uint32_t entry_table_offset = BE32(header->pkg_table_offset);
-		uint64_t entry_table_size = entry_count * sizeof(pkg_table_entry);
+		size_t entry_count;
+		uint32_t entry_table_offset;
+		uint64_t entry_table_size;
+		if (!GetPkgEntryTableInfo(header, entry_count, entry_table_offset, entry_table_size))
+			return "";
+
 		void *entry_table_data = malloc(entry_table_size);
+		if (entry_table_data == nullptr)
+			return "";
 
 		int ret = client->GetRange(path, entry_table_data, entry_table_size, entry_table_offset);
 		if (ret == 0)
@@ -654,7 +698,13 @@ namespace INSTALLER
 		std::string title;
 		if (param_sfo_offset > 0 && param_sfo_size > 0)
 		{
+			if (param_sfo_size > 1048576)
+				return title;
+
 			param_sfo_data = malloc(param_sfo_size);
+			if (param_sfo_data == nullptr)
+				return title;
+
 			int ret = client->GetRange(path, param_sfo_data, param_sfo_size, param_sfo_offset);
 			if (ret)
 			{
@@ -949,7 +999,7 @@ namespace INSTALLER
 		if (!path.empty() && !title_id.empty()) {
 			std::string icon_path = std::string("/data/homebrew/ezremote-client/game-icons/") + title_id + ".png";
 			FS::MkDirs("/data/homebrew/ezremote-client/game-icons");
-			if (ExtractRemotePkg(path, TMP_SFO_PATH, icon_path)) {
+			if (ExtractRemotePkg(client, path, TMP_SFO_PATH, icon_path)) {
 				if (FS::FileExists(icon_path)) {
 					icon_url = std::string("http://") + GetLocalIP() + ":" + std::to_string(http_int_server_port) + "/game-icons/" + title_id + ".png";
 				}
@@ -1102,177 +1152,138 @@ namespace INSTALLER
 	bool ExtractLocalPkg(const std::string &path, const std::string sfo_path, const std::string icon_path)
 	{
 		pkg_header tmp_hdr;
-		FS::Head(path, &tmp_hdr, sizeof(pkg_header));
-
-		if (BE32(tmp_hdr.pkg_magic) != PS4_PKG_MAGIC && BE32(tmp_hdr.pkg_magic) != PS5_PKG_MAGIC)
+		memset(&tmp_hdr, 0, sizeof(tmp_hdr));
+		if (FS::Head(path, &tmp_hdr, sizeof(pkg_header)) == 0)
 			return false;
 
-		size_t entry_count = BE32(tmp_hdr.pkg_entry_count);
-		uint32_t entry_table_offset = BE32(tmp_hdr.pkg_table_offset);
-		uint64_t entry_table_size = entry_count * sizeof(pkg_table_entry);
-		void *entry_table_data = malloc(entry_table_size);
+		size_t entry_count;
+		uint32_t entry_table_offset;
+		uint64_t entry_table_size;
+		if (!GetPkgEntryTableInfo(&tmp_hdr, entry_count, entry_table_offset, entry_table_size))
+			return false;
 
 		FILE *fd = FS::OpenRead(path);
-		FS::Seek(fd, entry_table_offset);
-		FS::Read(fd, entry_table_data, entry_table_size);
+		if (fd == nullptr)
+			return false;
 
-		pkg_table_entry *entries = (pkg_table_entry *)entry_table_data;
-		void *param_sfo_data = NULL;
-		uint32_t param_sfo_offset = 0;
-		uint32_t param_sfo_size = 0;
-		void *icon0_png_data = NULL;
-		uint32_t icon0_png_offset = 0;
-		uint32_t icon0_png_size = 0;
-		short items = 0;
-		for (size_t i = 0; i < entry_count; ++i)
+		void *entry_table_data = malloc(entry_table_size);
+		if (entry_table_data == nullptr)
 		{
-			switch (BE32(entries[i].id))
+			FS::Close(fd);
+			return false;
+		}
+
+		bool ok = false;
+		FS::Seek(fd, entry_table_offset);
+		if (FS::Read(fd, entry_table_data, (uint32_t)entry_table_size) == (int)entry_table_size)
+		{
+			uint32_t param_sfo_offset = 0;
+			uint32_t param_sfo_size = 0;
+			uint32_t icon0_png_offset = 0;
+			uint32_t icon0_png_size = 0;
+			FindPkgExtractEntries(entry_table_data, entry_count, param_sfo_offset, param_sfo_size, icon0_png_offset, icon0_png_size);
+
+			if (param_sfo_size > 0)
 			{
-			case PKG_ENTRY_ID_PARAM_SFO:
-				param_sfo_offset = BE32(entries[i].offset);
-				param_sfo_size = BE32(entries[i].size);
-				items++;
-				break;
-			case PKG_ENTRY_ID_ICON0_PNG:
-				icon0_png_offset = BE32(entries[i].offset);
-				icon0_png_size = BE32(entries[i].size);
-				items++;
-				break;
-			default:
-				continue;
+				void *param_sfo_data = malloc(param_sfo_size);
+				FILE *out = param_sfo_data != nullptr ? FS::Create(sfo_path) : nullptr;
+				if (out != nullptr)
+				{
+					FS::Seek(fd, param_sfo_offset);
+					if (FS::Read(fd, param_sfo_data, param_sfo_size) == (int)param_sfo_size)
+						FS::Write(out, param_sfo_data, param_sfo_size);
+					FS::Close(out);
+				}
+				free(param_sfo_data);
 			}
 
-			if (items == 2)
-				break;
+			if (icon0_png_size > 0)
+			{
+				void *icon0_png_data = malloc(icon0_png_size);
+				FILE *out = icon0_png_data != nullptr ? FS::Create(icon_path) : nullptr;
+				if (out != nullptr)
+				{
+					FS::Seek(fd, icon0_png_offset);
+					if (FS::Read(fd, icon0_png_data, icon0_png_size) == (int)icon0_png_size)
+					{
+						FS::Write(out, icon0_png_data, icon0_png_size);
+						ok = true;
+					}
+					FS::Close(out);
+				}
+				free(icon0_png_data);
+			}
 		}
+
 		free(entry_table_data);
-
-		if (param_sfo_offset > 0 && param_sfo_size > 0)
-		{
-			param_sfo_data = malloc(param_sfo_size);
-			FILE *out = FS::Create(sfo_path);
-			FS::Seek(fd, param_sfo_offset);
-			FS::Read(fd, param_sfo_data, param_sfo_size);
-			FS::Write(out, param_sfo_data, param_sfo_size);
-			FS::Close(out);
-			free(param_sfo_data);
-		}
-
-		if (icon0_png_offset > 0 && icon0_png_size > 0)
-		{
-			icon0_png_data = malloc(icon0_png_size);
-			FILE *out = FS::Create(icon_path);
-			FS::Seek(fd, icon0_png_offset);
-			FS::Read(fd, icon0_png_data, icon0_png_size);
-			FS::Write(out, icon0_png_data, icon0_png_size);
-			FS::Close(out);
-			free(icon0_png_data);
-		}
-
 		FS::Close(fd);
-		return true;
+		return ok;
 	}
 
-	bool ExtractRemotePkg(const std::string &path, const std::string sfo_path, const std::string icon_path)
+	bool ExtractRemotePkg(RemoteClient *client, const std::string &path, const std::string sfo_path, const std::string icon_path)
 	{
+		if (client == nullptr || path.empty())
+			return false;
+
 		pkg_header tmp_hdr;
-		if (!remoteclient->Head(path, &tmp_hdr, sizeof(pkg_header)))
+		memset(&tmp_hdr, 0, sizeof(tmp_hdr));
+		if (!client->Head(path, &tmp_hdr, sizeof(pkg_header)))
 			return false;
 
-		if (BE32(tmp_hdr.pkg_magic) != PS4_PKG_MAGIC && BE32(tmp_hdr.pkg_magic) != PS5_PKG_MAGIC)
+		size_t entry_count;
+		uint32_t entry_table_offset;
+		uint64_t entry_table_size;
+		if (!GetPkgEntryTableInfo(&tmp_hdr, entry_count, entry_table_offset, entry_table_size))
 			return false;
 
-		size_t entry_count = BE32(tmp_hdr.pkg_entry_count);
-		uint32_t entry_table_offset = BE32(tmp_hdr.pkg_table_offset);
-		uint64_t entry_table_size = entry_count * sizeof(pkg_table_entry);
 		void *entry_table_data = malloc(entry_table_size);
 		if (entry_table_data == nullptr)
 			return false;
 
-		if (!remoteclient->GetRange(path, entry_table_data, entry_table_size, entry_table_offset))
+		if (!client->GetRange(path, entry_table_data, entry_table_size, entry_table_offset))
 		{
 			free(entry_table_data);
 			return false;
 		}
 
-		pkg_table_entry *entries = (pkg_table_entry *)entry_table_data;
-		void *param_sfo_data = NULL;
 		uint32_t param_sfo_offset = 0;
 		uint32_t param_sfo_size = 0;
-		void *icon0_png_data = NULL;
 		uint32_t icon0_png_offset = 0;
 		uint32_t icon0_png_size = 0;
-		short items = 0;
-		for (size_t i = 0; i < entry_count; ++i)
-		{
-			switch (BE32(entries[i].id))
-			{
-			case PKG_ENTRY_ID_PARAM_SFO:
-				param_sfo_offset = BE32(entries[i].offset);
-				param_sfo_size = BE32(entries[i].size);
-				items++;
-				break;
-			case PKG_ENTRY_ID_ICON0_PNG:
-				icon0_png_offset = BE32(entries[i].offset);
-				icon0_png_size = BE32(entries[i].size);
-				items++;
-				break;
-			default:
-				continue;
-			}
-
-			if (items == 2)
-				break;
-		}
+		FindPkgExtractEntries(entry_table_data, entry_count, param_sfo_offset, param_sfo_size, icon0_png_offset, icon0_png_size);
 		free(entry_table_data);
 
-		if (param_sfo_offset > 0 && param_sfo_size > 0)
+		if (param_sfo_size > 0)
 		{
-			param_sfo_data = malloc(param_sfo_size);
-			if (param_sfo_data == nullptr)
-				return false;
-			FILE *out = FS::Create(sfo_path);
-			if (out == nullptr)
+			void *param_sfo_data = malloc(param_sfo_size);
+			FILE *out = param_sfo_data != nullptr ? FS::Create(sfo_path) : nullptr;
+			if (out != nullptr)
 			{
-				free(param_sfo_data);
-				return false;
-			}
-			if (!remoteclient->GetRange(path, param_sfo_data, param_sfo_size, param_sfo_offset))
-			{
+				if (client->GetRange(path, param_sfo_data, param_sfo_size, param_sfo_offset))
+					FS::Write(out, param_sfo_data, param_sfo_size);
 				FS::Close(out);
-				free(param_sfo_data);
-				FS::Rm(sfo_path);
-				return false;
 			}
-			FS::Write(out, param_sfo_data, param_sfo_size);
-			FS::Close(out);
 			free(param_sfo_data);
 		}
 
-		if (icon0_png_offset > 0 && icon0_png_size > 0)
+		bool ok = false;
+		if (icon0_png_size > 0)
 		{
-			icon0_png_data = malloc(icon0_png_size);
-			if (icon0_png_data == nullptr)
-				return false;
-			FILE *out = FS::Create(icon_path);
-			if (out == nullptr)
+			void *icon0_png_data = malloc(icon0_png_size);
+			FILE *out = icon0_png_data != nullptr ? FS::Create(icon_path) : nullptr;
+			if (out != nullptr)
 			{
-				free(icon0_png_data);
-				return false;
-			}
-			if (!remoteclient->GetRange(path, icon0_png_data, icon0_png_size, icon0_png_offset))
-			{
+				if (client->GetRange(path, icon0_png_data, icon0_png_size, icon0_png_offset))
+				{
+					FS::Write(out, icon0_png_data, icon0_png_size);
+					ok = true;
+				}
 				FS::Close(out);
-				free(icon0_png_data);
-				FS::Rm(icon_path);
-				return false;
 			}
-			FS::Write(out, icon0_png_data, icon0_png_size);
-			FS::Close(out);
 			free(icon0_png_data);
 		}
 
-		return true;
+		return ok;
 	}
 
 	ArchivePkgInstallData *GetArchivePkgInstallData(const std::string &hash)
@@ -1311,7 +1322,7 @@ namespace INSTALLER
 		if (!title_id.empty() && pkg_data && pkg_data->archive_entry && pkg_data->archive_entry->client_data && pkg_data->archive_entry->client_data->client) {
 			std::string icon_path = std::string("/data/homebrew/ezremote-client/game-icons/") + title_id + ".png";
 			FS::MkDirs("/data/homebrew/ezremote-client/game-icons");
-			ExtractRemotePkg(pkg_data->archive_entry->client_data->path, TMP_SFO_PATH, icon_path);
+			ExtractRemotePkg(pkg_data->archive_entry->client_data->client, pkg_data->archive_entry->client_data->path, TMP_SFO_PATH, icon_path);
 			if (FS::FileExists(icon_path)) {
 				icon_url = std::string("http://") + GetLocalIP() + ":" + std::to_string(http_int_server_port) + "/game-icons/" + title_id + ".png";
 			}
@@ -1430,7 +1441,7 @@ namespace INSTALLER
 		if (!title_id.empty() && pkg_data && pkg_data->remote_client) {
 			std::string icon_path = std::string("/data/homebrew/ezremote-client/game-icons/") + title_id + ".png";
 			FS::MkDirs("/data/homebrew/ezremote-client/game-icons");
-			ExtractRemotePkg(pkg_data->path, TMP_SFO_PATH, icon_path);
+			ExtractRemotePkg(pkg_data->remote_client, pkg_data->path, TMP_SFO_PATH, icon_path);
 			if (FS::FileExists(icon_path)) {
 				icon_url = std::string("http://") + GetLocalIP() + ":" + std::to_string(http_int_server_port) + "/game-icons/" + title_id + ".png";
 			}

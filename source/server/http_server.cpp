@@ -18,6 +18,9 @@
 #include <sys/sysctl.h>
 #include <sys/types.h>
 #include <sys/user.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <unistd.h>
 #include <sys/statvfs.h>
 #include <json-c/json.h>
@@ -66,6 +69,65 @@ std::vector<RemoteSettings> configured_sites;
 namespace HttpServer
 {
     static const int MAX_ACTIVE_TRANSFER_JOBS = 1;
+    static const unsigned short PAYLOAD_LOADER_PORT = 9021;
+    static const char *RESTART_SERVER_ARG = "restart-server";
+
+    static bool WriteAllToSocket(int fd, const char *data, size_t size)
+    {
+        while (size > 0)
+        {
+            ssize_t written = write(fd, data, size);
+            if (written <= 0)
+            {
+                return false;
+            }
+            data += written;
+            size -= static_cast<size_t>(written);
+        }
+        return true;
+    }
+
+    static bool LaunchRestartClient()
+    {
+        if (access(CLIENT_ELF_PATH, R_OK) != 0)
+        {
+            dbglogger_log("[Restart] Client ELF not readable: %s", CLIENT_ELF_PATH);
+            return false;
+        }
+
+        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0)
+        {
+            dbglogger_log("[Restart] Failed to create payload loader socket: %s", strerror(errno));
+            return false;
+        }
+
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(PAYLOAD_LOADER_PORT);
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+        if (connect(sockfd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) != 0)
+        {
+            dbglogger_log("[Restart] Failed to connect to payload loader: %s", strerror(errno));
+            close(sockfd);
+            return false;
+        }
+
+        std::string uri = std::string("file:") + CLIENT_ELF_PATH + "?args=" + RESTART_SERVER_ARG + "\n";
+        bool ok = WriteAllToSocket(sockfd, uri.c_str(), uri.size());
+        close(sockfd);
+
+        if (!ok)
+        {
+            dbglogger_log("[Restart] Failed to send restart client URI to payload loader.");
+            return false;
+        }
+
+        dbglogger_log("[Restart] Launched ezRemote Client restart helper.");
+        return true;
+    }
 
     static bool TryReserveBackgroundTransferSlot()
     {
@@ -1152,6 +1214,7 @@ namespace HttpServer
 
     std::atomic<bool> bg_fileop_running{false};
     pthread_t fileop_thread;
+    static bool bg_fileop_thread_started = false;
 
     void *FileOpFilesThread(void *argp)
     {
@@ -1186,8 +1249,28 @@ namespace HttpServer
 
     void StartFileOpThread()
     {
+        if (bg_fileop_thread_started)
+            return;
+
         bg_fileop_running.store(true);
-        pthread_create(&fileop_thread, NULL, FileOpFilesThread, NULL);
+        if (pthread_create(&fileop_thread, NULL, FileOpFilesThread, NULL) == 0)
+        {
+            bg_fileop_thread_started = true;
+        }
+        else
+        {
+            bg_fileop_running.store(false);
+        }
+    }
+
+    void StopFileOpThread()
+    {
+        if (!bg_fileop_thread_started)
+            return;
+
+        bg_fileop_running.store(false);
+        pthread_join(fileop_thread, NULL);
+        bg_fileop_thread_started = false;
     }
 
 
@@ -1205,8 +1288,41 @@ RemoteClient *GetRemoteClientForSite(int site_idx) {
 }
 
 bool StartExtractJob(int site_idx, const std::string& item, const std::string& destination, const std::string& folderName, std::string* error, uint64_t* job_id) {
-    *error = "Remote extraction not yet implemented on server side";
-    return false;
+    BgExtractData extract_data;
+    extract_data.id = Util::GetTick();
+    if (job_id) *job_id = extract_data.id;
+
+    std::string safe_folderName = folderName;
+    size_t pos = safe_folderName.find_last_of("/\\");
+    if (pos != std::string::npos) {
+        safe_folderName = safe_folderName.substr(pos + 1);
+    }
+
+    if (site_idx >= 0 && site_idx < configured_sites.size()) {
+        RemoteSettings& s = configured_sites[site_idx];
+        extract_data.host_info.type = s.type;
+        extract_data.host_info.url = s.server;
+        extract_data.host_info.username = s.username;
+        extract_data.host_info.password = s.password;
+        extract_data.host_info.http_server_type = s.http_server_type;
+    } else {
+        extract_data.host_info.type = 0;
+        extract_data.host_info.url = "";
+    }
+    
+    extract_data.host_info.client = nullptr;
+    extract_data.src_path = item;
+    extract_data.dest_path = destination;
+    extract_data.folder_name = safe_folderName;
+    extract_data.file_size = 0;
+    extract_data.state = EXTRACT_STATE_PENDING;
+    extract_data.bytes_transfered = 0;
+    extract_data.timestamp = Util::GetTick();
+    extract_data.finished_timestamp = 0;
+
+    CONFIG::AddBgExtractData(extract_data);
+    CONFIG::SaveBgExtractData();
+    return true;
 }
 
     void *ServerThread(void *argp)
@@ -1238,14 +1354,10 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
                         return true;
                     }
                     sink.done();
-                    FS::Close(in);
                     return true;
                 },
                 [in](bool) {
-                    // Close happens in the sink.done() block or here if aborted
-                    if (in != nullptr) {
-                        FS::Close(in);
-                    }
+                    FS::Close(in);
                 });
         };
 
@@ -1560,13 +1672,19 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
                     return;
                 }
 
+                std::string safe_folder_name = folder_name_param;
+                size_t pos = safe_folder_name.find_last_of("/\\");
+                if (pos != std::string::npos) {
+                    safe_folder_name = safe_folder_name.substr(pos + 1);
+                }
+
                 BgExtractData extract_data;
                 extract_data.host_info.type = type_param;
                 extract_data.host_info.url = url_param != nullptr ? url_param : "";
                 extract_data.host_info.client = nullptr;
                 extract_data.src_path = src_path_param;
                 extract_data.dest_path = dest_path_param;
-                extract_data.folder_name = folder_name_param;
+                extract_data.folder_name = safe_folder_name;
                 extract_data.file_size = 0; // Not strictly tracked for extracts yet
                 extract_data.state = EXTRACT_STATE_PENDING;
                 extract_data.id = id_param;
@@ -1727,9 +1845,24 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
                 const char *dest_path_param = json_object_get_string(json_object_object_get(jobj, "newPath"));
                 json_object *items_arr = json_object_object_get(jobj, "items");
 
+                if (type_param < FILEOP_COPY || type_param > FILEOP_DELETE)
+                {
+                    bad_request(res, "Invalid file operation type");
+                    json_object_put(jobj);
+                    return;
+                }
+
                 if (!items_arr || json_object_get_type(items_arr) != json_type_array)
                 {
                     bad_request(res, "Missing or invalid items array");
+                    json_object_put(jobj);
+                    return;
+                }
+
+                if ((type_param == FILEOP_COPY || type_param == FILEOP_MOVE) &&
+                    (dest_path_param == nullptr || dest_path_param[0] == '\0'))
+                {
+                    bad_request(res, "Missing destination path");
                     json_object_put(jobj);
                     return;
                 }
@@ -1746,7 +1879,14 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
                 struct array_list *arr = json_object_get_array(items_arr);
                 op_data.total_items = arr->length;
                 for (size_t i = 0; i < arr->length; i++) {
-                    op_data.items.push_back(json_object_get_string((json_object*)array_list_get_idx(arr, i)));
+                    const char *item = json_object_get_string((json_object*)array_list_get_idx(arr, i));
+                    if (item == nullptr || item[0] == '\0')
+                    {
+                        bad_request(res, "Invalid item path");
+                        json_object_put(jobj);
+                        return;
+                    }
+                    op_data.items.push_back(item);
                 }
 
                 CONFIG::AddBgFileOpData(op_data);
@@ -1906,7 +2046,14 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
             }
 
             uint64_t id_param = json_object_get_uint64(id_obj);
-            std::string type = json_object_get_string(type_obj);
+            const char *type_param = json_object_get_string(type_obj);
+            if (type_param == nullptr || type_param[0] == '\0')
+            {
+                json_object_put(jobj);
+                bad_request(res, "Missing type");
+                return;
+            }
+            std::string type = type_param;
             bool found = false;
 
             if (type == "download")
@@ -2030,13 +2177,13 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
 
         svr->Get("/__local__/restart_daemon", [&](const Request & /*req*/, Response & res) {
             set_cors_header(res);
-            res.status = 200;
-            res.set_content("{\"status\":\"success\"}", "application/json");
-            FILE *f = fopen("/data/homebrew/ezremote-client/restart.flag", "w");
-            if (f) {
-                FS::Close(f);
+            if (LaunchRestartClient()) {
+                res.status = 200;
+                res.set_content("{\"status\":\"success\"}", "application/json");
+            } else {
+                res.status = 500;
+                res.set_content("{\"status\":\"error\",\"error\":\"Failed to launch restart helper\"}", "application/json");
             }
-            svr->stop();
         });
 
         svr->Get("/stop", [&](const Request & /*req*/, Response & res)
@@ -2071,7 +2218,9 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
 
         svr->set_logger([](const Request &req, const Response &res)
         {
-            dbglogger_log("[ezremote-server] [%s] %s -> %d", req.method.c_str(), req.path.c_str(), res.status);
+            if (res.status != 200) {
+                dbglogger_log("[ezremote-server] [%s] %s -> %d", req.method.c_str(), req.path.c_str(), res.status);
+            }
             if (res.status >= 400 && !res.body.empty()) {
                 dbglogger_log("[ezremote-server] Error body: %s", res.body.c_str());
             }
@@ -2104,6 +2253,7 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
         {
             StopDownloadThread();
             StopExtractThread();
+            StopFileOpThread();
             delete svr;
             svr = nullptr;
             return;
@@ -2113,6 +2263,7 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
         ServerThread(nullptr);
         StopDownloadThread();
         StopExtractThread();
+        StopFileOpThread();
 
         delete svr;
         svr = nullptr;
@@ -2124,6 +2275,7 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
             svr->stop();
         StopDownloadThread();
         StopExtractThread();
+        StopFileOpThread();
     }
 
     void StartDownloadThread()
@@ -2196,6 +2348,7 @@ namespace HttpServer { void RegisterNewEndpoints(httplib::Server* svr) {
             char buf[256];
             sprintf(buf, FAILURE_MSG, "Missing url or path");
             res.set_content(buf, "application/json");
+            json_object_put(jobj);
             return;
         }
 
@@ -2204,6 +2357,13 @@ namespace HttpServer { void RegisterNewEndpoints(httplib::Server* svr) {
 
         // Use a default HTTP client for now
         RemoteClient* client = nullptr; // Would be resolved based on URL/Settings
+        if (client == nullptr) {
+            char buf[256];
+            sprintf(buf, FAILURE_MSG, "Remote install endpoint is not initialized");
+            res.set_content(buf, "application/json");
+            json_object_put(jobj);
+            return;
+        }
 
         bool started = g_pkg_installer.StartRemoteInstall(client, url, path, &settings);
         if (started) {
@@ -2213,6 +2373,7 @@ namespace HttpServer { void RegisterNewEndpoints(httplib::Server* svr) {
             sprintf(buf, FAILURE_MSG, "Already installing");
             res.set_content(buf, "application/json");
         }
+        json_object_put(jobj);
     });
 
     svr->Get("/api/get_install_progress", [&](const httplib::Request &req, httplib::Response &res) {

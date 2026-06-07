@@ -41,7 +41,7 @@ add_executable(${PROJECT_NAME}.elf
   source/usecase/file_manager_usecase.cpp
 )
 
-target_compile_definitions(${PROJECT_NAME}.elf PRIVATE EZREMOTE_VERSION=${APP_VERSION} CPPHTTPLIB_THREAD_POOL_COUNT=64)
+target_compile_definitions(${PROJECT_NAME}.elf PRIVATE EZREMOTE_VERSION=${APP_VERSION} CPPHTTPLIB_THREAD_POOL_COUNT=8)
 
 target_link_libraries(${PROJECT_NAME}.elf
   zstd

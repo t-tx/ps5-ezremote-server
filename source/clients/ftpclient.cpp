@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include <errno.h>
+#include <algorithm>
 
 #include "lang.h"
 #include "clients/ftpclient.h"
@@ -40,12 +41,17 @@ FtpClient::FtpClient()
 {
 	mp_ftphandle = static_cast<ftphandle *>(calloc(1, sizeof(ftphandle)));
 	if (mp_ftphandle == NULL)
+	{
 		perror("calloc");
+		return;
+	}
 	mp_ftphandle->buf = static_cast<char *>(malloc(FTP_CLIENT_BUFSIZ));
 	if (mp_ftphandle->buf == NULL)
 	{
 		perror("calloc");
 		free(mp_ftphandle);
+		mp_ftphandle = nullptr;
+		return;
 	}
 	ClearHandle();
 	time_t now = time(0);
@@ -54,14 +60,25 @@ FtpClient::FtpClient()
 
 FtpClient::~FtpClient()
 {
+	if (mp_ftphandle == nullptr)
+		return;
 	free(mp_ftphandle->buf);
 	free(mp_ftphandle);
 }
 
 int FtpClient::Connect(const std::string &url, const std::string &user, const std::string &pass, bool send_ping)
 {
+	if (mp_ftphandle == nullptr || url.empty())
+		return 0;
+
 	int port = 21;
-	std::string host = url.substr(6);
+	std::string host = url.rfind("ftp://", 0) == 0 ? url.substr(6) : url;
+	size_t slash_pos = host.find('/');
+	if (slash_pos != std::string::npos)
+		host = host.substr(0, slash_pos);
+	if (host.empty())
+		return 0;
+
 	size_t colon_pos = host.find(":");
 	if (colon_pos != std::string::npos)
 	{
@@ -199,7 +216,8 @@ int FtpClient::FtpSendCmd(const std::string &cmd, const std::string &expected_re
 	if (nControl->dir != FTP_CLIENT_CONTROL)
 		return 0;
 
-	sprintf(buf, "%s\r\n", cmd.c_str());
+	if (snprintf(buf, sizeof(buf), "%s\r\n", cmd.c_str()) >= (int)sizeof(buf))
+		return 0;
 	x = send(nControl->handle, buf, strlen(buf), 0);
 	if (x <= 0)
 	{
@@ -273,11 +291,10 @@ int FtpClient::Readline(char *buf, int max, ftphandle *nControl)
 			nControl->cavail -= x;
 			if (end != NULL)
 			{
-				bp -= 2;
-				if (strcmp(bp, "\r\n") == 0)
+				if (retval >= 2 && bp[-2] == '\r' && bp[-1] == '\n')
 				{
-					*bp++ = '\n';
-					*bp++ = '\0';
+					bp[-2] = '\n';
+					bp[-1] = '\0';
 					--retval;
 				}
 				break;
@@ -338,6 +355,7 @@ bool FtpClient::IsConnected()
 {
 	if (mp_ftphandle)
 		return mp_ftphandle->is_connected;
+	return false;
 }
 
 void FtpClient::ClearHandle()
@@ -1084,6 +1102,9 @@ int FtpClient::FtpClose(ftphandle *nData)
  */
 int FtpClient::Quit()
 {
+	if (mp_ftphandle == nullptr)
+		return 0;
+
 	if (mp_ftphandle->handle == 0)
 	{
 		strcpy(mp_ftphandle->response, "error: no anwser from server\n");
@@ -1704,6 +1725,8 @@ int FtpClient::ParseDirEntry(char *line, DirEntry *dirEntry)
 	// Exclude hidden files and folders (names starting with '.')
 	if (!show_hidden_files && dirEntry->name[0] == '.')
 		return -1;
+	if (dirEntry->name[0] == '\0')
+		return -1;
 
 	// The directory entry is valid
 	return 1;
@@ -1711,6 +1734,9 @@ int FtpClient::ParseDirEntry(char *line, DirEntry *dirEntry)
 
 int FtpClient::ParseMLSDDirEntry(char *line, DirEntry *dirEntry)
 {
+	if (line == nullptr || dirEntry == nullptr)
+		return -1;
+
 	char *p;
 	char *token;
 	char *facts;
@@ -1721,9 +1747,13 @@ int FtpClient::ParseMLSDDirEntry(char *line, DirEntry *dirEntry)
 
 	// Split string by first space: facts portion and name portion
 	facts = strtok_r(line, " ", &p);
+	if (facts == nullptr)
+		return -1;
 
 	// path is the rest of the line after the space, strip trailing CR/LF
 	token = strtok_r(p, "\r\n", &p);
+	if (token == nullptr || token[0] == '\0')
+		return -1;
 	snprintf(dirEntry->name, 256, "%s", token);
 
 	// Split facts by semicolon and parse each key=value pair
@@ -1773,26 +1803,29 @@ std::vector<DirEntry> FtpClient::ListDir(const std::string &path)
 	int ret;
 	mp_ftphandle->offset = 0;
 
-	Chdir(path);
+	if (!Chdir(path))
+		return out;
+
 	nData = RawOpen("", FtpClient::dirverbose, FtpClient::ascii);
 	if (nData != NULL)
 	{
 		ret = FtpRead(buf, 1024, nData);
 		while (ret > 0)
 		{
+			buf[std::min(ret, static_cast<int>(sizeof(buf) - 1))] = '\0';
 			DirEntry entry;
 			memset(&entry, 0, sizeof(entry));
 			entry.selectable = true;
 			if (ParseDirEntry(buf, &entry) > 0)
 			{
-				sprintf(entry.directory, "%s", path.c_str());
+				snprintf(entry.directory, sizeof(entry.directory), "%s", path.c_str());
 				if (path.length() > 0 && path[path.length() - 1] == '/')
 				{
-					sprintf(entry.path, "%s%s", path.c_str(), entry.name);
+					snprintf(entry.path, sizeof(entry.path), "%s%s", path.c_str(), entry.name);
 				}
 				else
 				{
-					sprintf(entry.path, "%s/%s", path.c_str(), entry.name);
+					snprintf(entry.path, sizeof(entry.path), "%s/%s", path.c_str(), entry.name);
 				}
 
 				if (entry.isDir)

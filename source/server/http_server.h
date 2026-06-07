@@ -16,6 +16,7 @@ namespace HttpServer
     void StartExtractThread();
     void StopExtractThread();
     void StartFileOpThread();
+    void StopFileOpThread();
 }
 
 extern int http_server_port;
