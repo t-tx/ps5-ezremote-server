@@ -150,9 +150,11 @@ namespace CONFIG
     void AddBgFileOpData(BgFileOpData bg_fileop_data);
     void LoadBgFileOpData();
     void SaveBgFileOpData();
+    void LoadConfiguredSites();
+    void SaveConfiguredSites();
     void LockFileOpList();
     void UnlockFileOpList();
 }
 #endif
-extern int sites[256];
-extern RemoteSettings site_settings[256];
+extern std::vector<RemoteSettings> configured_sites;
+

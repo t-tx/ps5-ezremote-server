@@ -61,6 +61,8 @@ static bool bg_extract_thread_started = false;
 static std::atomic<int> bg_transfer_active_jobs{0};
 static uint64_t g_dl_offset;
 
+std::vector<RemoteSettings> configured_sites;
+
 namespace HttpServer
 {
     static const int MAX_ACTIVE_TRANSFER_JOBS = 1;
@@ -1188,7 +1190,7 @@ namespace HttpServer
         pthread_create(&fileop_thread, NULL, FileOpFilesThread, NULL);
     }
 
-std::vector<RemoteSettings> configured_sites;
+
 
 RemoteClient *GetRemoteClientForSite(int site_idx) {
     if (site_idx < 0 || site_idx >= configured_sites.size()) return nullptr;
@@ -1209,6 +1211,53 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
 
     void *ServerThread(void *argp)
     {
+        auto serve_log_file = [&](const std::string& path, Response &res) {
+            if (!FS::FileExists(path.c_str())) {
+                res.status = 404;
+                res.set_content("Log file not found", "text/plain");
+                return;
+            }
+            FILE *in = FS::OpenRead(path.c_str());
+            if (in == nullptr) {
+                res.status = 500;
+                res.set_content("Could not open log file", "text/plain");
+                return;
+            }
+            size_t size = FS::GetSize(path.c_str());
+            res.set_content_provider(
+                size, "text/plain",
+                [in](size_t offset, size_t length, DataSink &sink) {
+                    size_t size_to_read = std::min(static_cast<size_t>(length), (size_t)1048576);
+                    std::vector<char> buff(size_to_read);
+                    size_t read_len;
+                    FS::Seek(in, offset);
+                    read_len = FS::Read(in, buff.data(), size_to_read);
+                    if (read_len > 0)
+                    {
+                        sink.write(buff.data(), read_len);
+                        return true;
+                    }
+                    sink.done();
+                    FS::Close(in);
+                    return true;
+                },
+                [in](bool) {
+                    // Close happens in the sink.done() block or here if aborted
+                    if (in != nullptr) {
+                        FS::Close(in);
+                    }
+                });
+        };
+
+        svr->Get("/debug/client.log", [&](const Request &req, Response &res)
+                 { serve_log_file("/data/homebrew/ezremote-client/client.log", res); });
+
+        svr->Get("/debug/server.log", [&](const Request &req, Response &res)
+                 { serve_log_file("/data/homebrew/ezremote-client/server.log", res); });
+
+        svr->Get("/debug/log", [&](const Request &req, Response &res)
+                 { res.set_redirect("/debug/client.log"); });
+
         svr->Get("/", [&](const Request &req, Response &res)
                  { res.set_redirect("/index.html"); });
                  
@@ -1979,8 +2028,22 @@ bool StartExtractJob(int site_idx, const std::string& item, const std::string& d
             json_object_put(dest_list);
         });
 
-        svr->Get("/stop", [&](const Request & /*req*/, Response & /*res*/)
+        svr->Get("/__local__/restart_daemon", [&](const Request & /*req*/, Response & res) {
+            set_cors_header(res);
+            res.status = 200;
+            res.set_content("{\"status\":\"success\"}", "application/json");
+            FILE *f = fopen("/data/homebrew/ezremote-client/restart.flag", "w");
+            if (f) {
+                FS::Close(f);
+            }
+            svr->stop();
+        });
+
+        svr->Get("/stop", [&](const Request & /*req*/, Response & res)
         {
+            set_cors_header(res);
+            res.status = 200;
+            res.set_content("{\"status\":\"success\"}", "application/json");
             svr->stop();
         });
 

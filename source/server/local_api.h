@@ -203,11 +203,15 @@ svr->Get("/api/sites", [&](const Request &req, Response &res) {
     for (size_t i = 0; i < configured_sites.size(); i++) {
         RemoteSettings& s = configured_sites[i];
         json_object *site = json_object_new_object();
+        json_object_object_add(site, "site_idx", json_object_new_int(i));
         json_object_object_add(site, "name", json_object_new_string(s.site_name));
-        json_object_object_add(site, "url", json_object_new_string(s.server));
+        json_object_object_add(site, "server", json_object_new_string(s.server));
         json_object_object_add(site, "username", json_object_new_string(s.username));
         json_object_object_add(site, "password", json_object_new_string(s.password));
         json_object_object_add(site, "type", json_object_new_int(s.type));
+        json_object_object_add(site, "http_server_type", json_object_new_string(s.http_server_type));
+        json_object_object_add(site, "default_directory", json_object_new_string(s.default_directory));
+        json_object_object_add(site, "enable_rpi", json_object_new_boolean(s.enable_rpi));
         json_object_array_add(json_sites, site);
     }
     json_object *results = json_object_new_object();
@@ -224,20 +228,40 @@ svr->Post("/api/sitesave", [&](const Request &req, Response &res) {
         RemoteSettings s;
         memset(&s, 0, sizeof(s));
         
-        const char* name = json_object_get_string(json_object_object_get(jobj, "name"));
-        const char* url = json_object_get_string(json_object_object_get(jobj, "url"));
+        const char* server = json_object_get_string(json_object_object_get(jobj, "server"));
         const char* username = json_object_get_string(json_object_object_get(jobj, "username"));
         const char* password = json_object_get_string(json_object_object_get(jobj, "password"));
-        int type = json_object_get_int(json_object_object_get(jobj, "type"));
+        const char* http_server_type = json_object_get_string(json_object_object_get(jobj, "http_server_type"));
+        const char* default_dir = json_object_get_string(json_object_object_get(jobj, "default_directory"));
+        json_object* enable_rpi_obj = json_object_object_get(jobj, "enable_rpi");
         
-        if (name) strncpy(s.site_name, name, sizeof(s.site_name)-1);
-        if (url) strncpy(s.server, url, sizeof(s.server)-1);
+        if (server) {
+            strncpy(s.server, server, sizeof(s.server)-1);
+            strncpy(s.site_name, server, sizeof(s.site_name)-1); // Use server as name for now
+            
+            // Infer type from server URL prefix
+            if (strncmp(server, "ftp://", 6) == 0) s.type = CLIENT_TYPE_FTP;
+            else if (strncmp(server, "http://", 7) == 0 || strncmp(server, "https://", 8) == 0) s.type = CLIENT_TYPE_HTTP_SERVER;
+            else s.type = CLIENT_TYPE_FTP; // Default
+        }
         if (username) strncpy(s.username, username, sizeof(s.username)-1);
         if (password) strncpy(s.password, password, sizeof(s.password)-1);
-        s.type = (ClientType)type;
+        if (http_server_type) strncpy(s.http_server_type, http_server_type, sizeof(s.http_server_type)-1);
+        if (default_dir) strncpy(s.default_directory, default_dir, sizeof(s.default_directory)-1);
+        if (enable_rpi_obj) s.enable_rpi = json_object_get_boolean(enable_rpi_obj);
         
         configured_sites.push_back(s);
-        success(res);
+        CONFIG::SaveConfiguredSites();
+        
+        json_object *results = json_object_new_object();
+        json_object *result_obj = json_object_new_object();
+        json_object_object_add(result_obj, "site_idx", json_object_new_int(configured_sites.size() - 1));
+        json_object_object_add(results, "result", result_obj);
+        
+        const char *results_str = json_object_to_json_string(results);
+        res.status = 200;
+        res.set_content(results_str, strlen(results_str), "application/json");
+        json_object_put(results);
     } else {
         bad_request(res, "Invalid payload");
     }
@@ -561,8 +585,214 @@ svr->Post("/api/siteextract", [&](const Request &req, Response &res) {
                 json_object_put(jobj);
                 return;
             }
-
             /* ExtractQueuedResponse(res, job_id); */
             json_object_put(jobj);
+        });
+
+        svr->Get("/__local__/downloadFile", [&](const Request &req, Response &res) {
+            std::string path = req.get_param_value("path", 0);
+            if (path.empty()) { bad_request(res, "Failed to download"); return; }
+            int64_t size = FS::GetSize(path.c_str());
+            FILE *in = FS::OpenRead(path.c_str());
+            if (!in) { bad_request(res, "Failed to download"); return; }
+            size_t slash_pos = path.find_last_of("/");
+            std::string name = (slash_pos != std::string::npos) ? path.substr(slash_pos+1) : path;
+            res.set_header("Content-Disposition", "attachment; filename=\"" + name + "\"");
+            res.set_content_provider(size, "application/octet-stream",
+                [in](size_t offset, size_t length, DataSink &sink) {
+                    size_t size_to_read = std::min(static_cast<size_t>(length), (size_t)1048576);
+                    std::vector<char> buff(size_to_read);
+                    FS::Seek(in, offset);
+                    size_t read_len = FS::Read(in, buff.data(), size_to_read);
+                    if (read_len > 0) sink.write(buff.data(), read_len);
+                    return true;
+                },
+                [in](bool) { FS::Close(in); }
+            );
+        });
+
+        svr->Post("/api/sitedownloaddest", [&](const Request &req, Response &res) {
+            json_object *jobj = json_tokener_parse(req.body.c_str());
+            if (!jobj) { bad_request(res, "Invalid payload"); return; }
+            json_object *site_idx_obj = json_object_object_get(jobj, "site_idx");
+            if (!site_idx_obj) { bad_request(res, "Missing parameters"); json_object_put(jobj); return; }
+            int site_idx = json_object_get_int(site_idx_obj);
+            if (site_idx < 0 || site_idx >= configured_sites.size()) { failed(res, 500, "Invalid site_idx"); json_object_put(jobj); return; }
+            RemoteSettings& s = configured_sites[site_idx];
+            
+            const char* path = json_object_get_string(json_object_object_get(jobj, "path"));
+            const char* dest = json_object_get_string(json_object_object_get(jobj, "destination"));
+            bool isDir = json_object_get_boolean(json_object_object_get(jobj, "isDir"));
+            
+            BgDownloadData download_data;
+            download_data.host_info.type = s.type;
+            download_data.host_info.url = s.server;
+            download_data.host_info.username = s.username;
+            download_data.host_info.password = s.password;
+            download_data.host_info.http_server_type = s.http_server_type;
+            download_data.host_info.client = nullptr;
+            download_data.src_path = path;
+            
+            std::string temp = std::string(path);
+            size_t slash_pos = temp.find_last_of("/");
+            std::string filename = temp.substr(slash_pos+1);
+            download_data.dest_path = std::string(dest) + "/" + filename;
+            
+            download_data.file_size = 0;
+            download_data.state = STATE_PENDING;
+            download_data.id = Util::GetTick();
+            download_data.bytes_transfered = 0;
+            download_data.completed_bytes = 0;
+            download_data.timestamp = Util::GetTick();
+            download_data.finished_timestamp = 0;
+            download_data.is_dir = isDir;
+            
+            CONFIG::AddBgDownloadData(download_data);
+            CONFIG::SaveBgDownloadData();
+            success(res);
+            json_object_put(jobj);
+        });
+
+        svr->Post("/api/siteinstall", [&](const Request &req, Response &res) {
+            json_object *jobj = json_tokener_parse(req.body.c_str());
+            if (!jobj) { bad_request(res, "Invalid payload"); return; }
+            json_object *site_idx_obj = json_object_object_get(jobj, "site_idx");
+            json_object *items = json_object_object_get(jobj, "items");
+            if (!site_idx_obj || !items) { bad_request(res, "Missing parameters"); json_object_put(jobj); return; }
+            int site_idx = json_object_get_int(site_idx_obj);
+            if (site_idx < 0 || site_idx >= configured_sites.size()) { failed(res, 500, "Invalid site_idx"); json_object_put(jobj); return; }
+            RemoteSettings& s = configured_sites[site_idx];
+            
+            RemoteClient* client = GetRemoteClientForSite(site_idx);
+            if (!client || !client->IsConnected()) {
+                if (client) { client->Quit(); delete client; }
+                failed(res, 500, "Connection failed"); json_object_put(jobj); return;
+            }
+
+            size_t len = json_object_array_length(items);
+            if (len > 0) {
+                const char *item = json_object_get_string(json_object_array_get_idx(items, 0));
+                std::string url = client->GetDirectUrl(item);
+                g_pkg_installer.StartRemoteInstall(client, url.c_str(), item, &s);
+            } else {
+                client->Quit(); delete client;
+            }
+            success(res);
+            json_object_put(jobj);
+        });
+
+        svr->Post("/api/sitemkdir", [&](const Request &req, Response &res) {
+            json_object *jobj = json_tokener_parse(req.body.c_str());
+            if (!jobj) { bad_request(res, "Invalid payload"); return; }
+            json_object *site_idx_obj = json_object_object_get(jobj, "site_idx");
+            json_object *path_obj = json_object_object_get(jobj, "newPath");
+            if (!site_idx_obj || !path_obj) { bad_request(res, "Missing parameters"); json_object_put(jobj); return; }
+            int site_idx = json_object_get_int(site_idx_obj);
+            const char* path = json_object_get_string(path_obj);
+            if (site_idx < 0 || site_idx >= configured_sites.size()) { failed(res, 500, "Invalid site_idx"); json_object_put(jobj); return; }
+            RemoteClient *client = GetRemoteClientForSite(site_idx);
+            if (!client || !client->IsConnected()) { if (client) { client->Quit(); delete client; } failed(res, 500, "Connection failed"); json_object_put(jobj); return; }
+            int r = client->Mkdir(path);
+            client->Quit(); delete client;
+            if (r != 0) success(res); else failed(res, 500, "Mkdir failed");
+            json_object_put(jobj);
+        });
+
+        svr->Post("/api/siterename", [&](const Request &req, Response &res) {
+            json_object *jobj = json_tokener_parse(req.body.c_str());
+            if (!jobj) { bad_request(res, "Invalid payload"); return; }
+            json_object *site_idx_obj = json_object_object_get(jobj, "site_idx");
+            json_object *oldPath_obj = json_object_object_get(jobj, "oldPath");
+            json_object *newPath_obj = json_object_object_get(jobj, "newPath");
+            if (!site_idx_obj || !oldPath_obj || !newPath_obj) { bad_request(res, "Missing parameters"); json_object_put(jobj); return; }
+            int site_idx = json_object_get_int(site_idx_obj);
+            const char* oldPath = json_object_get_string(oldPath_obj);
+            const char* newPath = json_object_get_string(newPath_obj);
+            if (site_idx < 0 || site_idx >= configured_sites.size()) { failed(res, 500, "Invalid site_idx"); json_object_put(jobj); return; }
+            RemoteClient *client = GetRemoteClientForSite(site_idx);
+            if (!client || !client->IsConnected()) { if (client) { client->Quit(); delete client; } failed(res, 500, "Connection failed"); json_object_put(jobj); return; }
+            int r = client->Rename(oldPath, newPath);
+            client->Quit(); delete client;
+            if (r != 0) success(res); else failed(res, 500, "Rename failed");
+            json_object_put(jobj);
+        });
+
+        svr->Post("/api/siteremove", [&](const Request &req, Response &res) {
+            json_object *jobj = json_tokener_parse(req.body.c_str());
+            if (!jobj) { bad_request(res, "Invalid payload"); return; }
+            json_object *site_idx_obj = json_object_object_get(jobj, "site_idx");
+            json_object *items_obj = json_object_object_get(jobj, "items");
+            if (!site_idx_obj || !items_obj || json_object_get_type(items_obj) != json_type_array) { bad_request(res, "Missing parameters"); json_object_put(jobj); return; }
+            int site_idx = json_object_get_int(site_idx_obj);
+            if (site_idx < 0 || site_idx >= configured_sites.size()) { failed(res, 500, "Invalid site_idx"); json_object_put(jobj); return; }
+            RemoteClient *client = GetRemoteClientForSite(site_idx);
+            if (!client || !client->IsConnected()) { if (client) { client->Quit(); delete client; } failed(res, 500, "Connection failed"); json_object_put(jobj); return; }
+            bool all_success = true;
+            size_t len = json_object_array_length(items_obj);
+            for (size_t i=0; i<len; i++) {
+                const char* item = json_object_get_string(json_object_array_get_idx(items_obj, i));
+                if (client->Delete(item) == 0) {
+                    if (client->Rmdir(item, true) == 0) all_success = false;
+                }
+            }
+            client->Quit(); delete client;
+            if (all_success) success(res); else failed(res, 500, "Some removes failed");
+            json_object_put(jobj);
+        });
+
+        svr->Post("/api/pkginfo", [&](const Request &req, Response &res) {
+            json_object *jobj = json_tokener_parse(req.body.c_str());
+            if (!jobj) { bad_request(res, "Invalid payload"); return; }
+            const char *path = json_object_get_string(json_object_object_get(jobj, "path"));
+            json_object *site_idx_obj = json_object_object_get(jobj, "site_idx");
+            int site_idx = -1;
+            if (site_idx_obj && json_object_get_type(site_idx_obj) != json_type_null) site_idx = json_object_get_int(site_idx_obj);
+            if (!path) { bad_request(res, "Missing path"); json_object_put(jobj); return; }
+            RemoteClient *client = nullptr;
+            if (site_idx >= 0 && site_idx < configured_sites.size()) {
+                client = GetRemoteClientForSite(site_idx);
+                if (!client || !client->IsConnected()) { if (client) { client->Quit(); delete client; } failed(res, 500, "Connection failed"); json_object_put(jobj); return; }
+            }
+            std::map<std::string, std::string> sfo_params;
+            if (!INSTALLER::GetPkgSfoInfo(path, client, sfo_params)) {
+                if (client) { client->Quit(); delete client; }
+                failed(res, 400, "Could not read PKG metadata"); json_object_put(jobj); return;
+            }
+            std::string title_id = sfo_params["TITLE_ID"];
+            std::string icon_url = "";
+            if (!title_id.empty()) {
+                std::string icon_path = std::string("/data/homebrew/ezremote-client/game-icons/") + title_id + ".png";
+                FS::MkDirs("/data/homebrew/ezremote-client/game-icons");
+                if (!FS::FileExists(icon_path)) {
+                    if (client) INSTALLER::ExtractRemotePkg(path, "/data/homebrew/ezremote-client/temp.sfo", icon_path);
+                    else INSTALLER::ExtractLocalPkg(path, "/data/homebrew/ezremote-client/temp.sfo", icon_path);
+                }
+                if (FS::FileExists(icon_path)) icon_url = "/game-icons/" + title_id + ".png";
+            }
+            if (client) { client->Quit(); delete client; }
+            json_object *res_obj = json_object_new_object();
+            for (auto const& [key, val] : sfo_params) json_object_object_add(res_obj, key.c_str(), json_object_new_string(val.c_str()));
+            if (!icon_url.empty()) json_object_object_add(res_obj, "ICON_URL", json_object_new_string(icon_url.c_str()));
+            const char *res_str = json_object_to_json_string(res_obj);
+            res.status = 200;
+            res.set_content(res_str, strlen(res_str), "application/json");
+            json_object_put(res_obj);
+            json_object_put(jobj);
+        });
+
+        svr->Get("/api/extract/status", [&](const Request &req, Response &res) {
+            // Forward to existing background extract state logic
+            json_object *extract_list = json_object_new_array();
+            CONFIG::LockExtractList();
+            for (auto it = bg_extract_list.begin(); it != bg_extract_list.end(); ++it) {
+                json_object *extract_item_obj = json_object_new_object();
+                json_object_object_add(extract_item_obj, "state", json_object_new_int(it->state));
+                json_object_array_add(extract_list, extract_item_obj);
+            }
+            CONFIG::UnlockExtractList();
+            const char *payload_str = json_object_to_json_string(extract_list);
+            res.status = 200;
+            res.set_content(payload_str, strlen(payload_str), "application/json");
+            json_object_put(extract_list);
         });
 

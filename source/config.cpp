@@ -651,5 +651,86 @@ namespace CONFIG
     {
         fileop_mutex_.unlock();
     }
+
+#define CONFIGURED_SITES_PATH DATA_PATH "/remote_sites.json"
+
+    void LoadConfiguredSites()
+    {
+        if (FS::FileExists(CONFIGURED_SITES_PATH))
+        {
+            json_object *jobj = json_object_from_file(CONFIGURED_SITES_PATH);
+            if (jobj != nullptr)
+            {
+                configured_sites.clear();
+                int num_sites = json_object_array_length(jobj);
+                for (int i = 0; i < num_sites; i++)
+                {
+                    json_object *site_obj = json_object_array_get_idx(jobj, i);
+                    if (site_obj)
+                    {
+                        RemoteSettings s;
+                        memset(&s, 0, sizeof(s));
+                        
+                        json_object *name_obj = json_object_object_get(site_obj, "site_name");
+                        if (name_obj) strncpy(s.site_name, json_object_get_string(name_obj), sizeof(s.site_name)-1);
+                        
+                        json_object *server_obj = json_object_object_get(site_obj, "server");
+                        if (server_obj) strncpy(s.server, json_object_get_string(server_obj), sizeof(s.server)-1);
+                        
+                        json_object *user_obj = json_object_object_get(site_obj, "username");
+                        if (user_obj) strncpy(s.username, json_object_get_string(user_obj), sizeof(s.username)-1);
+                        
+                        json_object *pass_obj = json_object_object_get(site_obj, "password");
+                        if (pass_obj) strncpy(s.password, json_object_get_string(pass_obj), sizeof(s.password)-1);
+                        
+                        json_object *type_obj = json_object_object_get(site_obj, "type");
+                        if (type_obj) s.type = (ClientType)json_object_get_int(type_obj);
+                        
+                        json_object *rpi_obj = json_object_object_get(site_obj, "enable_rpi");
+                        if (rpi_obj) s.enable_rpi = json_object_get_boolean(rpi_obj);
+                        
+                        json_object *http_obj = json_object_object_get(site_obj, "http_server_type");
+                        if (http_obj) strncpy(s.http_server_type, json_object_get_string(http_obj), sizeof(s.http_server_type)-1);
+                        
+                        json_object *dir_obj = json_object_object_get(site_obj, "default_directory");
+                        if (dir_obj) strncpy(s.default_directory, json_object_get_string(dir_obj), sizeof(s.default_directory)-1);
+                        
+                        configured_sites.push_back(s);
+                    }
+                }
+                json_object_put(jobj);
+            }
+        }
+    }
+
+    void SaveConfiguredSites()
+    {
+        if (!FS::FolderExists(DATA_PATH))
+        {
+            FS::MkDirs(DATA_PATH);
+        }
+
+        json_object *sites_list = json_object_new_array();
+
+        for (size_t i = 0; i < configured_sites.size(); i++)
+        {
+            RemoteSettings& s = configured_sites[i];
+            json_object *site_obj = json_object_new_object();
+            
+            json_object_object_add(site_obj, "site_name", json_object_new_string(s.site_name));
+            json_object_object_add(site_obj, "server", json_object_new_string(s.server));
+            json_object_object_add(site_obj, "username", json_object_new_string(s.username));
+            json_object_object_add(site_obj, "password", json_object_new_string(s.password));
+            json_object_object_add(site_obj, "type", json_object_new_int(s.type));
+            json_object_object_add(site_obj, "enable_rpi", json_object_new_boolean(s.enable_rpi));
+            json_object_object_add(site_obj, "http_server_type", json_object_new_string(s.http_server_type));
+            json_object_object_add(site_obj, "default_directory", json_object_new_string(s.default_directory));
+            
+            json_object_array_add(sites_list, site_obj);
+        }
+
+        json_object_to_file(CONFIGURED_SITES_PATH, sites_list);
+        json_object_put(sites_list);
+    }
 }
 int http_int_server_port = 6701;

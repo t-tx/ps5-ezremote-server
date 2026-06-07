@@ -1693,39 +1693,8 @@ namespace INSTALLER
 		return -1;
 	}
 
-    RemoteClient *GetRemoteClient(int site_idx)
-    {
-        RemoteClient *tmp_client = nullptr;
-        RemoteSettings *tmp_settings = &site_settings[sites[site_idx]];
 
-		return GetRemoteClient(tmp_settings);
-    }
 
-	RemoteClient *GetRemoteClient(RemoteSettings *settings)
-	{
-		RemoteClient *tmp_client = nullptr;;
-
-        if (settings->type == CLIENT_TYPE_HTTP_SERVER)
-        {
-            if (strcmp(remote_settings->http_server_type, HTTP_SERVER_MS_IIS) == 0)
-                tmp_client = new IISClient();
-            else
-                tmp_client = new BaseClient();
-        }
-        else if (settings->type == CLIENT_TYPE_FTP)
-        {
-            tmp_client = new FtpClient();
-            FtpClient *ftp_client = (FtpClient*) tmp_client;
-            ftp_client->SetCallbackXferFunction(FtpCallback);
-        }
-
-        tmp_client->Connect(settings->server, settings->username, settings->password, false);
-
-        return tmp_client;
-	}
-}
-
-namespace INSTALLER {
     bool GetPkgSfoInfo(const std::string &path, RemoteClient *client, std::map<std::string, std::string> &sfo_params)
     {
         pkg_header header;

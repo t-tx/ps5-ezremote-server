@@ -34,6 +34,7 @@ int main(int argc, char *argv[])
     CONFIG::LoadBgDownloadData();
     CONFIG::LoadBgExtractData();
     CONFIG::LoadBgFileOpData();
+    CONFIG::LoadConfiguredSites();
     DpiUseCase::Initialize();
     LegacyDpiServer::Start();
 

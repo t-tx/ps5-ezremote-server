@@ -179,6 +179,4 @@ namespace INSTALLER
     int StartEzRemoteServer();
     std::string StoreBgInstallHostData(RemoteSettings *remote_settings, const std::string &path);
     std::string GetLastInstallError();
-    RemoteClient *GetRemoteClient(int site_idx);
-    RemoteClient *GetRemoteClient(RemoteSettings *settings);
 }
