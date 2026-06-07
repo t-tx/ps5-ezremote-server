@@ -55,7 +55,7 @@ struct DirEntry
     static void Sort(std::vector<DirEntry> &list, int sort_by = 0)
     {
         std::sort(list.begin(), list.end(), [sort_by](const DirEntry &p1, const DirEntry &p2) {
-            if (strcasecmp(p1.name, "..") == 0) return true;
+            if (strcasecmp(p1.name, "..") == 0) return strcasecmp(p2.name, "..") != 0;
             if (strcasecmp(p2.name, "..") == 0) return false;
 
             if (p1.isDir && !p2.isDir) return true;

@@ -72,6 +72,7 @@ public:
     virtual int Quit() = 0;
     virtual ClientType clientType() = 0;
     virtual uint32_t SupportedActions() = 0;
+    virtual void SetCancelFlag(bool *cancel_flag) { (void)cancel_flag; }
     virtual std::string GetDirectUrl(const std::string &path) { return ""; }
 };
 

@@ -20,6 +20,13 @@
 #define FTP_CLIENT_BUFSIZ 1048576
 #define ACCEPT_TIMEOUT 30
 
+static int FtpCancelCallback(int64_t xfered, void *arg)
+{
+	(void)xfered;
+	bool *cancel_flag = static_cast<bool *>(arg);
+	return (cancel_flag != nullptr && *cancel_flag) ? 0 : 1;
+}
+
 /* io types */
 #define FTP_CLIENT_CONTROL 0
 #define FTP_CLIENT_READ 1
@@ -353,6 +360,14 @@ void FtpClient::ClearHandle()
 void FtpClient::SetConnmode(connmode mode)
 {
 	mp_ftphandle->cmode = mode;
+}
+
+void FtpClient::SetCancelFlag(bool *cancel_flag)
+{
+	this->cancel_flag = cancel_flag;
+	mp_ftphandle->cbarg = cancel_flag;
+	mp_ftphandle->cbbytes = cancel_flag != nullptr ? 1 : 0;
+	mp_ftphandle->xfercb = cancel_flag != nullptr ? FtpCancelCallback : nullptr;
 }
 
 /*

@@ -2,10 +2,12 @@ cmake_minimum_required(VERSION 3.5)
 
 project(ezremote-server)
 
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/ezremote_versions.cmake")
+
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -Wno-keyword-macro -fPIC -fPIE -march=znver2 -Wall -fstack-protector-all")
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -fpermissive")
 
-set(APP_VERSION "1.04")
+set(APP_VERSION "${EZREMOTE_SERVER_VERSION}")
 
 include_directories(
   source
@@ -18,28 +20,9 @@ include_directories(
 add_executable(${PROJECT_NAME}.elf
   source/http/httplib.cpp
   source/server/http_server.cpp
-  source/clients/archiveorg.cpp
   source/clients/baseclient.cpp
   source/clients/ftpclient.cpp
-  source/clients/sftpclient.cpp
-  source/clients/nfsclient.cpp
-  source/clients/smbclient.cpp
-  source/clients/webdav.cpp
-  source/clients/apache.cpp
-  source/clients/github.cpp
-  source/clients/myrient.cpp
   source/clients/iis.cpp
-  source/clients/nginx.cpp
-  source/clients/npxserve.cpp
-  source/clients/rclone.cpp
-  source/filehost/1fichier.cpp
-  source/filehost/alldebrid.cpp
-  source/filehost/directhost.cpp
-  source/filehost/filehost.cpp
-  source/filehost/gdrive.cpp
-  source/filehost/mediafire.cpp
-  source/filehost/pixeldrain.cpp
-  source/filehost/realdebrid.cpp
   source/config.cpp
   source/crypt.c
   source/dbglogger.c
@@ -69,9 +52,6 @@ target_link_libraries(${PROJECT_NAME}.elf
   ssl
   curl
   json-c
-  smb2
-  ssh2
-  nfs
   iconv
   charset
   archive

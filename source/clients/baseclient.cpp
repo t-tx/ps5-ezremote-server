@@ -22,6 +22,7 @@ struct RangeTransferContext {
     uint64_t written;
     bool checked;
     bool valid;
+    bool *cancel_flag;
 };
 
 static bool ExpectedContentRange(const CHTTPClient::HttpResponse &res, uint64_t offset, uint64_t size)
@@ -57,6 +58,9 @@ static bool ContentRangeTotal(const CHTTPClient::HttpResponse &res, uint64_t off
 
 static bool CheckRangeTransfer(RangeTransferContext *out, size_t bytes)
 {
+    if (out->cancel_flag != nullptr && *(out->cancel_flag))
+        return false;
+
     if (!out->checked)
     {
         out->valid = ExpectedContentRange(*out->response, out->offset, out->size);
@@ -93,8 +97,10 @@ int BaseClient::NothingCallback(void* ptr, double dTotalToDownload, double dNowD
 int BaseClient::DownloadProgressCallback(void* ptr, double dTotalToDownload, double dNowDownloaded, double dTotalToUpload, double dNowUploaded)
 {
     CHTTPClient::ProgressFnStruct *progress_data = (CHTTPClient::ProgressFnStruct*) ptr;
-    int64_t *bytes_transfered = (int64_t *) progress_data->pOwner;
-	*bytes_transfered = dNowDownloaded;
+    BaseClient *client = progress_data != nullptr ? static_cast<BaseClient *>(progress_data->pOwner) : nullptr;
+    bytes_transfered = static_cast<uint64_t>(dNowDownloaded);
+    if (client != nullptr && client->cancel_flag != nullptr && *(client->cancel_flag))
+        return 1;
     return 0;
 }
 
@@ -186,6 +192,11 @@ int BaseClient::Connect(const std::string &url, const std::string &username, con
     return 1;
 }
 
+void BaseClient::SetCancelFlag(bool *cancel_flag)
+{
+    this->cancel_flag = cancel_flag;
+}
+
 int BaseClient::Mkdir(const std::string &path)
 {
     sprintf(this->response, "%s", lang_strings[STR_UNSUPPORTED_OPERATION_MSG]);
@@ -254,7 +265,7 @@ int BaseClient::Get(const std::string &outputfile, const std::string &path, uint
         bytes_to_download = 0; // Unknown size, but continue downloading
     }
 
-    client->SetProgressFnCallback(&bytes_transfered, DownloadProgressCallback);
+    client->SetProgressFnCallback(this, DownloadProgressCallback);
     std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
     if (client->DownloadFile(outputfile, encoded_url, status))
     {
@@ -266,7 +277,10 @@ int BaseClient::Get(const std::string &outputfile, const std::string &path, uint
     }
     else
     {
-        sprintf(this->response, "%ld - %s", status, lang_strings[STR_FAIL_DOWNLOAD_MSG]);
+        if (cancel_flag != nullptr && *cancel_flag)
+            sprintf(this->response, "%s", "Cancelled by user");
+        else
+            sprintf(this->response, "%ld - %s", status, lang_strings[STR_FAIL_DOWNLOAD_MSG]);
     }
     return 0;
 }
@@ -278,14 +292,17 @@ int BaseClient::Get(SplitFile *split_file, const std::string &path, uint64_t off
 
     prev_tick = Util::GetTick();
     std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
-    client->SetProgressFnCallback(nullptr, NothingCallback);
+    client->SetProgressFnCallback(this, DownloadProgressCallback);
     if (client->DownloadFile((void*)split_file, encoded_url, (void*)WriteToSplitFileCallback, status))
     {
         return 1;
     }
     else
     {
-        sprintf(this->response, "%ld - %s", status, lang_strings[STR_FAIL_DOWNLOAD_MSG]);
+        if (cancel_flag != nullptr && *cancel_flag)
+            sprintf(this->response, "%s", "Cancelled by user");
+        else
+            sprintf(this->response, "%ld - %s", status, lang_strings[STR_FAIL_DOWNLOAD_MSG]);
     }
     return 0;
 }
@@ -303,7 +320,8 @@ int BaseClient::GetRange(const std::string &path, DataSink &sink, uint64_t size,
     headers["Range"] = range_header;
 
     std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
-    RangeTransferContext out = {&res, &sink, nullptr, offset, size, 0, false, false};
+    RangeTransferContext out = {&res, &sink, nullptr, offset, size, 0, false, false, cancel_flag};
+    client->SetProgressFnCallback(this, DownloadProgressCallback);
     if (client->Get(encoded_url, headers, res, (void*) &WriteDataSinkCallback, (void*)&out))
     {
         if (res.iCode == 206 && out.valid && out.written == size)
@@ -332,8 +350,8 @@ int BaseClient::GetRange(const std::string &path, void *buffer, uint64_t size, u
     headers["Range"] = range_header;
 
     std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
-    client->SetProgressFnCallback(nullptr, NothingCallback);
-    RangeTransferContext out = {&res, nullptr, (char*)buffer, offset, size, 0, false, false};
+    client->SetProgressFnCallback(this, DownloadProgressCallback);
+    RangeTransferContext out = {&res, nullptr, (char*)buffer, offset, size, 0, false, false, cancel_flag};
     if (client->Get(encoded_url, headers, res, (void*) &WriteBufferCallback, (void*) &out))
     {
         if (res.iCode == 206 && out.valid && out.written == size)
@@ -393,7 +411,7 @@ int BaseClient::Head(const std::string &path, void *buffer, uint64_t size)
 
     std::string encoded_url = this->host_url + Util::UrlEncode(GetFullPath(path));
     client->SetProgressFnCallback(nullptr, NothingCallback);
-    RangeTransferContext out = {&res, nullptr, (char*)buffer, 0, size, 0, false, false};
+    RangeTransferContext out = {&res, nullptr, (char*)buffer, 0, size, 0, false, false, nullptr};
     if (client->Get(encoded_url, headers, res, (void*) &WriteBufferCallback, (void*) &out))
     {
         if (res.iCode == 206 && out.valid && out.written == size)

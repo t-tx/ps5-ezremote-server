@@ -278,7 +278,7 @@ namespace ZipUtil
     /*
      * Extract to a file descriptor
      */
-    static int extract2fd(struct archive *a, const std::string &pathname, int fd)
+    static int extract2fd(struct archive *a, const std::string &pathname, int fd, bool *cancel_flag)
     {
         ssize_t len;
         unsigned char *buffer = (unsigned char *)malloc(ARCHIVE_TRANSFER_SIZE);
@@ -288,6 +288,13 @@ namespace ZipUtil
         /* loop over file contents and write to fd */
         for (int n = 0;; n++)
         {
+            if (stop_activity || (cancel_flag && *cancel_flag))
+            {
+                sprintf(status_message, "cancelled extraction ('%s')", pathname.c_str());
+                free(buffer);
+                return 0;
+            }
+
             len = archive_read_data(a, buffer, ARCHIVE_TRANSFER_SIZE);
 
             if (len == 0)
@@ -319,7 +326,7 @@ namespace ZipUtil
     /*
      * Extract a regular file.
      */
-    static void extract_file(struct archive *a, struct archive_entry *e, const std::string &path)
+    static void extract_file(struct archive *a, struct archive_entry *e, const std::string &path, bool *cancel_flag)
     {
         struct stat sb;
         int fd;
@@ -353,7 +360,7 @@ namespace ZipUtil
             return;
         }
 
-        extract2fd(a, path, fd);
+        extract2fd(a, path, fd, cancel_flag);
 
         /* set access and modification time */
         if (close(fd) != 0)
@@ -362,7 +369,7 @@ namespace ZipUtil
         }
     }
 
-    static void extract(struct archive *a, struct archive_entry *e, const std::string &base_dir)
+    static void extract(struct archive *a, struct archive_entry *e, const std::string &base_dir, bool *cancel_flag)
     {
         char *pathname, *realpathname;
         mode_t filetype;
@@ -404,7 +411,7 @@ namespace ZipUtil
             /* ensure that parent directory exists */
             FS::MkDirs(realpathname, true);
 
-            extract_file(a, e, realpathname);
+            extract_file(a, e, realpathname, cancel_flag);
         }
 
         free(realpathname);
@@ -446,10 +453,7 @@ namespace ZipUtil
 
     static RemoteArchiveData *OpenRemoteArchive(const std::string &file, RemoteClient *client)
     {
-        RemoteArchiveData *data;
-
-        data = (RemoteArchiveData *)malloc(sizeof(RemoteArchiveData));
-        memset(data, 0, sizeof(RemoteArchiveData));
+        RemoteArchiveData *data = new RemoteArchiveData{};
 
         data->offset = 0;
         client->Size(file, &data->size);
@@ -495,7 +499,7 @@ namespace ZipUtil
             RemoteArchiveData *data = (RemoteArchiveData *)client_data;
             if (data->client->SupportedActions() & REMOTE_ACTION_RAW_READ)
                 data->client->Close(data->fp);
-            free(client_data);
+            delete data;
         }
         return 0;
     }
@@ -612,7 +616,7 @@ namespace ZipUtil
             if (ret == ARCHIVE_EOF)
                 break;
 
-            extract(a, e, basepath);
+            extract(a, e, basepath, cancel_flag);
         }
 
         archive_read_free(a);

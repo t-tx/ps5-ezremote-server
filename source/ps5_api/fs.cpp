@@ -633,10 +633,15 @@ namespace FS
         if (from.compare(to) == 0)
             return true;
 
+        MkDirs(to, true);
+
         errno = 0;
         int ret = rename(from.c_str(), to.c_str());
-        if (ret != 0 && (errno == EXDEV || errno == EEXIST))
+        if (ret != 0)
         {
+            if (errno != EXDEV && errno != EEXIST)
+                return false;
+
             bool res = Copy(from, to, cancel_flag);
             if (res)
                 Rm(from);

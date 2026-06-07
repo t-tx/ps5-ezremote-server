@@ -41,6 +41,7 @@ public:
     int Quit();
     ClientType clientType();
     uint32_t SupportedActions();
+    void SetCancelFlag(bool *cancel_flag);
     std::string GetDirectUrl(const std::string &path);
     static std::string Escape(const std::string &url);
     static std::string UnEscape(const std::string &url);
@@ -58,6 +59,7 @@ protected:
     std::string host_url;
     char response[512];
     bool connected = false;
+    bool *cancel_flag = nullptr;
 };
 
 #endif

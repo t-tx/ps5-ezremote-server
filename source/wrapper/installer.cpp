@@ -8,21 +8,9 @@
 #include <ifaddrs.h>
 #include <json-c/json.h>
 #include "httpclient/HTTPClient.h"
-#include "clients/webdav.h"
 #include "clients/remote_client.h"
-#include "clients/smbclient.h"
-#include "clients/sftpclient.h"
 #include "clients/ftpclient.h"
-#include "clients/nfsclient.h"
-#include "clients/webdav.h"
-#include "clients/apache.h"
-#include "clients/archiveorg.h"
 #include "clients/iis.h"
-#include "clients/github.h"
-#include "clients/myrient.h"
-#include "clients/nginx.h"
-#include "clients/npxserve.h"
-#include "clients/rclone.h"
 #include "dbglogger.h"
 
 #include "server/http_server.h"
@@ -1719,44 +1707,16 @@ namespace INSTALLER
 
         if (settings->type == CLIENT_TYPE_HTTP_SERVER)
         {
-            if (strcmp(remote_settings->http_server_type, HTTP_SERVER_APACHE) == 0)
-                tmp_client = new ApacheClient();
-            else if (strcmp(remote_settings->http_server_type, HTTP_SERVER_MS_IIS) == 0)
+            if (strcmp(remote_settings->http_server_type, HTTP_SERVER_MS_IIS) == 0)
                 tmp_client = new IISClient();
-            else if (strcmp(remote_settings->http_server_type, HTTP_SERVER_NGINX) == 0)
-                tmp_client = new NginxClient();
-            else if (strcmp(remote_settings->http_server_type, HTTP_SERVER_NPX_SERVE) == 0)
-                tmp_client = new NpxServeClient();
-            else if (strcmp(remote_settings->http_server_type, HTTP_SERVER_RCLONE) == 0)
-                tmp_client = new RCloneClient();
-            else if (strcmp(remote_settings->http_server_type, HTTP_SERVER_ARCHIVEORG) == 0)
-                tmp_client = new ArchiveOrgClient();
-            else if (strcmp(remote_settings->http_server_type, HTTP_SERVER_GITHUB) == 0)
-                tmp_client = new GithubClient();
-            else if (strcmp(remote_settings->http_server_type, HTTP_SERVER_MYRIENT) == 0)
-                tmp_client = new MyrientClient();
-        }
-        else if (settings->type == CLIENT_TYPE_WEBDAV)
-        {
-            tmp_client = new WebDAVClient();
-        }
-        else if (settings->type == CLIENT_TYPE_SMB)
-        {
-            tmp_client = new SmbClient();
-        }
-        else if (settings->type == CLIENT_TYPE_SFTP)
-        {
-            tmp_client = new SFTPClient();
+            else
+                tmp_client = new BaseClient();
         }
         else if (settings->type == CLIENT_TYPE_FTP)
         {
             tmp_client = new FtpClient();
             FtpClient *ftp_client = (FtpClient*) tmp_client;
             ftp_client->SetCallbackXferFunction(FtpCallback);
-        }
-        else if (settings->type == CLIENT_TYPE_NFS)
-        {
-            tmp_client = new NfsClient();
         }
 
         tmp_client->Connect(settings->server, settings->username, settings->password, false);

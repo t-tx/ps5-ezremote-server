@@ -105,9 +105,11 @@ public:
 	std::string GetPath(std::string path1, std::string path2);
 	ClientType clientType();
 	uint32_t SupportedActions();
+	void SetCancelFlag(bool *cancel_flag);
 
 private:
 	ftphandle *mp_ftphandle;
+	bool *cancel_flag = nullptr;
 	struct tm cur_time;
 	timeval tick;
 	char server[128];

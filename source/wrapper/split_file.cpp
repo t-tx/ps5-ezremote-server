@@ -11,6 +11,8 @@ SplitFile::SplitFile(const std::string &path, size_t block_size)
     this->block_size = block_size;
     this->path = path;
     this->complete = false;
+    this->read_offset = 0;
+    this->block_in_progress = nullptr;
     sem_init(&this->block_ready, 0, 0);
 }
 
@@ -33,6 +35,9 @@ SplitFile::~SplitFile()
 
 int SplitFile::Open()
 {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (this->complete)
+        return -1;
     this->block_in_progress = NewBlock();
     return (block_in_progress->fd == nullptr);
 }
@@ -225,15 +230,18 @@ int SplitFile::Close()
 
         this->complete = true;
 
-        if (block_in_progress->fd != nullptr)
+        if (block_in_progress != nullptr)
         {
-            fflush(block_in_progress->fd);
-            fclose(block_in_progress->fd);
-            block_in_progress->fd = nullptr;
+            if (block_in_progress->fd != nullptr)
+            {
+                fflush(block_in_progress->fd);
+                fclose(block_in_progress->fd);
+                block_in_progress->fd = nullptr;
+            }
+            block_in_progress->status = BLOCK_STATUS_CREATED;
+            block_in_progress->is_last = true;
+            this->file_blocks.push_back(block_in_progress);
         }
-        block_in_progress->status = BLOCK_STATUS_CREATED;
-        block_in_progress->is_last = true;
-        this->file_blocks.push_back(block_in_progress);
         sem_post(&this->block_ready);
     } // lock released here — readers can proceed while we wait
 

@@ -423,6 +423,8 @@ namespace CONFIG
                 history_item.file_size = json_object_get_uint64(json_object_object_get(history_item_obj, "file_size"));
                 history_item.bytes_transfered = json_object_get_uint64(json_object_object_get(history_item_obj, "bytes_transfered"));
                 history_item.state = static_cast<ExtractState>(json_object_get_int(json_object_object_get(history_item_obj, "state")));
+                history_item.id = json_object_get_uint64(json_object_object_get(history_item_obj, "id"));
+                history_item.timestamp = json_object_get_uint64(json_object_object_get(history_item_obj, "timestamp"));
                 
                 history_item.retry_count = json_object_get_int(json_object_object_get(history_item_obj, "retry_count"));
                 
@@ -445,9 +447,6 @@ namespace CONFIG
                 {
                     history_item.fail_reason = std::string(json_object_get_string(fail_reason_obj));
                 }
-
-                history_item.id = json_object_get_uint64(json_object_object_get(history_item_obj, "id"));
-                history_item.timestamp = json_object_get_uint64(json_object_object_get(history_item_obj, "timestamp"));
                 json_object *finished_obj = json_object_object_get(history_item_obj, "finished_timestamp");
                 history_item.finished_timestamp = finished_obj != nullptr ? json_object_get_uint64(finished_obj) : 0;
                 if ((history_item.state == EXTRACT_STATE_FAILED || history_item.state == EXTRACT_STATE_SUCCESS) && history_item.finished_timestamp == 0)
@@ -653,4 +652,4 @@ namespace CONFIG
         fileop_mutex_.unlock();
     }
 }
-int http_int_server_port = 9090;
+int http_int_server_port = 6701;

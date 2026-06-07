@@ -25,25 +25,20 @@
 #include "ps5_api/fs.h"
 #include "clients/remote_client.h"
 #include "wrapper/zip_util.h"
-#include "clients/archiveorg.h"
 #include "clients/baseclient.h"
 #include "clients/ftpclient.h"
-#include "clients/nfsclient.h"
-#include "clients/smbclient.h"
-#include "clients/sftpclient.h"
-#include "clients/webdav.h"
-#include "clients/apache.h"
 #include "clients/iis.h"
-#include "clients/nginx.h"
-#include "clients/npxserve.h"
-#include "clients/rclone.h"
-#include "clients/github.h"
-#include "clients/myrient.h"
 #include "config.h"
 #include "ps5_api/fs.h"
 #include "util.h"
+#include "windows.h"
 #include "usecase/dpi_usecase.h"
 #include "dbglogger.h"
+#include "wrapper/installer.h"
+#include "usecase/pkg_install_usecase.h"
+#include "usecase/file_manager_usecase.h"
+static Usecase::PkgInstallUseCase g_pkg_installer;
+static Usecase::FileManagerUseCase g_file_manager;
 
 #define SUCCESS_MSG "{ \"result\": { \"success\": true, \"error\": null } }"
 #define FAILURE_MSG "{ \"result\": { \"success\": false, \"error\": \"%s\" } }"
@@ -63,10 +58,40 @@ static bool bg_download_thread_started = false;
 static pthread_t bg_extract_thread;
 static std::atomic<bool> bg_extract_running{false};
 static bool bg_extract_thread_started = false;
+static std::atomic<int> bg_transfer_active_jobs{0};
 static uint64_t g_dl_offset;
 
 namespace HttpServer
 {
+    static const int MAX_ACTIVE_TRANSFER_JOBS = 1;
+
+    static bool TryReserveBackgroundTransferSlot()
+    {
+        int active = bg_transfer_active_jobs.load();
+        while (active < MAX_ACTIVE_TRANSFER_JOBS)
+        {
+            if (bg_transfer_active_jobs.compare_exchange_weak(active, active + 1))
+                return true;
+        }
+        return false;
+    }
+
+    static void ReleaseBackgroundTransferSlot()
+    {
+        int active = bg_transfer_active_jobs.load();
+        while (active > 0 && !bg_transfer_active_jobs.compare_exchange_weak(active, active - 1))
+        {
+        }
+    }
+
+    struct BackgroundTransferSlotGuard
+    {
+        ~BackgroundTransferSlotGuard()
+        {
+            ReleaseBackgroundTransferSlot();
+        }
+    };
+
     static int FtpCallback(int64_t xfered, void *arg)
     {
         return 1;
@@ -184,44 +209,14 @@ namespace HttpServer
 
         if (host_info->type == CLIENT_TYPE_HTTP_SERVER)
         {
-            if (host_info->http_server_type.compare(HTTP_SERVER_APACHE) == 0)
-                tmp_client = new ApacheClient();
-            else if (host_info->http_server_type.compare(HTTP_SERVER_MS_IIS) == 0)
+            if (host_info->http_server_type.compare(HTTP_SERVER_MS_IIS) == 0)
                 tmp_client = new IISClient();
-            else if (host_info->http_server_type.compare(HTTP_SERVER_NGINX) == 0)
-                tmp_client = new NginxClient();
-            else if (host_info->http_server_type.compare(HTTP_SERVER_NPX_SERVE) == 0)
-                tmp_client = new NpxServeClient();
-            else if (host_info->http_server_type.compare(HTTP_SERVER_RCLONE) == 0)
-                tmp_client = new RCloneClient();
-            else if (host_info->http_server_type.compare(HTTP_SERVER_ARCHIVEORG) == 0)
-                tmp_client = new ArchiveOrgClient();
-            else if (host_info->http_server_type.compare(HTTP_SERVER_GITHUB) == 0)
-                tmp_client = new GithubClient();
-            else if (host_info->http_server_type.compare(HTTP_SERVER_MYRIENT) == 0)
-                tmp_client = new MyrientClient();
             else
                 tmp_client = new BaseClient();
-        }
-        else if (host_info->type == CLIENT_TYPE_SMB)
-        {
-            tmp_client = new SmbClient();
         }
         else if (host_info->type == CLIENT_TYPE_FILEHOST)
         {
             tmp_client = new BaseClient();
-        }
-        else if (host_info->type == CLIENT_TYPE_WEBDAV)
-        {
-            tmp_client = new WebDAVClient();
-        }
-        else if (host_info->type == CLIENT_TYPE_SFTP)
-        {
-            tmp_client = new SFTPClient();
-        }
-        else if (host_info->type == CLIENT_TYPE_NFS)
-        {
-            tmp_client = new NfsClient();
         }
         else if (host_info->type == CLIENT_TYPE_FTP)
         {
@@ -535,6 +530,7 @@ namespace HttpServer
     void *DownloadSingleFileThread(void *argp)
     {
         pthread_detach(pthread_self());
+        BackgroundTransferSlotGuard slot_guard;
         DownloadThreadArgs *args = static_cast<DownloadThreadArgs *>(argp);
         uint64_t id = args->id;
         delete args;
@@ -569,6 +565,7 @@ namespace HttpServer
             Util::RichNotify(active_dl->id, "Failed to connect for download %s", active_dl->dest_path.c_str());
             return nullptr;
         }
+        tmp_client->SetCancelFlag(&(active_dl->cancel_requested));
 
         FtpDownloadProgress progress_struct;
         progress_struct.bytes_transfered = &(active_dl->bytes_transfered);
@@ -614,6 +611,7 @@ namespace HttpServer
                         active_threads--;
                         return;
                     }
+                    worker_client->SetCancelFlag(&(active_dl->cancel_requested));
 
                     FtpDownloadProgress progress_struct;
                     progress_struct.bytes_transfered = &thread_progress[t];
@@ -788,28 +786,18 @@ namespace HttpServer
         while (bg_download_running.load())
         {
             std::vector<uint64_t> pending_jobs;
-            int current_downloading = 0;
-            const int MAX_CONCURRENT_DOWNLOADS = 1;
 
             CONFIG::LockDownloadList();
             for (auto it = bg_download_list.begin(); it != bg_download_list.end(); ++it)
             {
-                if (it->state == STATE_DOWNLOADING)
-                {
-                    current_downloading++;
-                }
-            }
-
-            for (auto it = bg_download_list.begin(); it != bg_download_list.end(); ++it)
-            {
                 if (it->state == STATE_PENDING || it->state == STATE_RESUMED)
                 {
-                    if (current_downloading < MAX_CONCURRENT_DOWNLOADS)
-                    {
-                        it->state = STATE_DOWNLOADING;
-                        pending_jobs.push_back(it->id);
-                        current_downloading++;
-                    }
+                    if (!TryReserveBackgroundTransferSlot())
+                        break;
+
+                    it->state = STATE_DOWNLOADING;
+                    pending_jobs.push_back(it->id);
+                    break;
                 }
             }
             CONFIG::UnlockDownloadList();
@@ -819,7 +807,24 @@ namespace HttpServer
                 DownloadThreadArgs *args = new DownloadThreadArgs();
                 args->id = id;
                 pthread_t thread;
-                pthread_create(&thread, NULL, DownloadSingleFileThread, args);
+                if (pthread_create(&thread, NULL, DownloadSingleFileThread, args) != 0)
+                {
+                    delete args;
+                    ReleaseBackgroundTransferSlot();
+                    CONFIG::LockDownloadList();
+                    for (auto it = bg_download_list.begin(); it != bg_download_list.end(); ++it)
+                    {
+                        if (it->id == id)
+                        {
+                            it->state = STATE_FAILED;
+                            it->fail_reason = "Failed to start download thread";
+                            it->finished_timestamp = Util::GetTick();
+                            break;
+                        }
+                    }
+                    CONFIG::UnlockDownloadList();
+                    CONFIG::SaveBgDownloadData();
+                }
             }
 
             sleep(1);
@@ -844,6 +849,7 @@ namespace HttpServer
     void *ExtractSingleFileThread(void *argp)
     {
         pthread_detach(pthread_self());
+        BackgroundTransferSlotGuard slot_guard;
         ExtractThreadArgs *args = static_cast<ExtractThreadArgs *>(argp);
         uint64_t id = args->id;
         delete args;
@@ -888,8 +894,10 @@ namespace HttpServer
 
         RemoteClient *tmp_client = nullptr;
         int ret = 0;
+        bytes_transfered = 0;
+        bytes_to_download = 0;
         
-        if (active_ext->host_info.type != 0 && active_ext->host_info.url.length() > 0)
+        if (!active_ext->host_info.url.empty())
         {
             tmp_client = GetRemoteClient(&(active_ext->host_info));
             if (tmp_client == nullptr || !tmp_client->IsConnected())
@@ -905,6 +913,7 @@ namespace HttpServer
                 Util::RichNotify(active_ext->id, "Extraction failed: Cannot connect to remote host");
                 return nullptr;
             }
+            tmp_client->SetCancelFlag(&(active_ext->cancel_requested));
             dbglogger_log("[Extract Task] Starting remote extraction for task ID %lu: %s", id, entry.name);
             ret = ZipUtil::Extract(entry, staging_path, tmp_client, &(active_ext->cancel_requested));
             DeleteRemoteClient(tmp_client);
@@ -930,9 +939,14 @@ namespace HttpServer
         }
         else if (ret <= 0)
         {
+            std::string fail_reason = ret == -1 ? "Unsupported compressed file format" : "Failed to extract file";
+            if (strlen(status_message) > 0)
+                fail_reason = status_message;
             CONFIG::LockExtractList();
             active_ext->state = EXTRACT_STATE_FAILED;
-            active_ext->fail_reason = ret == -1 ? "Unsupported compressed file format" : "Failed to extract file";
+            active_ext->fail_reason = fail_reason;
+            active_ext->bytes_transfered = bytes_transfered;
+            active_ext->file_size = bytes_to_download;
             active_ext->finished_timestamp = Util::GetTick();
             CONFIG::UnlockExtractList();
             CONFIG::SaveBgExtractData();
@@ -971,6 +985,8 @@ namespace HttpServer
 
         CONFIG::LockExtractList();
         active_ext->state = EXTRACT_STATE_SUCCESS;
+        active_ext->bytes_transfered = bytes_transfered;
+        active_ext->file_size = bytes_to_download;
         active_ext->finished_timestamp = Util::GetTick();
         CONFIG::UnlockExtractList();
         CONFIG::SaveBgExtractData();
@@ -985,28 +1001,18 @@ namespace HttpServer
         while (bg_extract_running.load())
         {
             std::vector<uint64_t> pending_jobs;
-            int current_extracting = 0;
-            const int MAX_CONCURRENT_EXTRACTIONS = 2;
 
             CONFIG::LockExtractList();
             for (auto it = bg_extract_list.begin(); it != bg_extract_list.end(); ++it)
             {
-                if (it->state == EXTRACT_STATE_EXTRACTING)
-                {
-                    current_extracting++;
-                }
-            }
-
-            for (auto it = bg_extract_list.begin(); it != bg_extract_list.end(); ++it)
-            {
                 if (it->state == EXTRACT_STATE_PENDING)
                 {
-                    if (current_extracting < MAX_CONCURRENT_EXTRACTIONS)
-                    {
-                        it->state = EXTRACT_STATE_EXTRACTING;
-                        pending_jobs.push_back(it->id);
-                        current_extracting++;
-                    }
+                    if (!TryReserveBackgroundTransferSlot())
+                        break;
+
+                    it->state = EXTRACT_STATE_EXTRACTING;
+                    pending_jobs.push_back(it->id);
+                    break;
                 }
             }
             CONFIG::UnlockExtractList();
@@ -1016,7 +1022,24 @@ namespace HttpServer
                 ExtractThreadArgs *args = new ExtractThreadArgs();
                 args->id = id;
                 pthread_t thread;
-                pthread_create(&thread, NULL, ExtractSingleFileThread, args);
+                if (pthread_create(&thread, NULL, ExtractSingleFileThread, args) != 0)
+                {
+                    delete args;
+                    ReleaseBackgroundTransferSlot();
+                    CONFIG::LockExtractList();
+                    for (auto it = bg_extract_list.begin(); it != bg_extract_list.end(); ++it)
+                    {
+                        if (it->id == id)
+                        {
+                            it->state = EXTRACT_STATE_FAILED;
+                            it->fail_reason = "Failed to start extraction thread";
+                            it->finished_timestamp = Util::GetTick();
+                            break;
+                        }
+                    }
+                    CONFIG::UnlockExtractList();
+                    CONFIG::SaveBgExtractData();
+                }
             }
 
             sleep(1);
@@ -1164,6 +1187,25 @@ namespace HttpServer
         bg_fileop_running.store(true);
         pthread_create(&fileop_thread, NULL, FileOpFilesThread, NULL);
     }
+
+std::vector<RemoteSettings> configured_sites;
+
+RemoteClient *GetRemoteClientForSite(int site_idx) {
+    if (site_idx < 0 || site_idx >= configured_sites.size()) return nullptr;
+    RemoteSettings& s = configured_sites[site_idx];
+    HostInfo host_info;
+    host_info.type = s.type;
+    host_info.url = s.server;
+    host_info.username = s.username;
+    host_info.password = s.password;
+    host_info.http_server_type = s.http_server_type;
+    return GetRemoteClient(&host_info);
+}
+
+bool StartExtractJob(int site_idx, const std::string& item, const std::string& destination, const std::string& folderName, std::string* error, uint64_t* job_id) {
+    *error = "Remote extraction not yet implemented on server side";
+    return false;
+}
 
     void *ServerThread(void *argp)
     {
@@ -1554,10 +1596,19 @@ namespace HttpServer
             for (auto it = bg_extract_list.begin(); it != bg_extract_list.end(); ++it)
             {
                 json_object *extract_item_obj = json_object_new_object();
+                uint64_t transferred = it->bytes_transfered;
+                uint64_t total = it->file_size;
+                if (it->state == EXTRACT_STATE_EXTRACTING)
+                {
+                    transferred = bytes_transfered;
+                    total = bytes_to_download;
+                }
                 json_object_object_add(extract_item_obj, "path", json_object_new_string(it->src_path.c_str()));
                 json_object_object_add(extract_item_obj, "id", json_object_new_uint64(it->id));
                 json_object_object_add(extract_item_obj, "retry_count", json_object_new_int(it->retry_count));
                 json_object_object_add(extract_item_obj, "dest_path", json_object_new_string((it->dest_path + "/" + it->folder_name).c_str()));
+                json_object_object_add(extract_item_obj, "bytes_transfered", json_object_new_uint64(transferred));
+                json_object_object_add(extract_item_obj, "file_size", json_object_new_uint64(total));
                 json_object_object_add(extract_item_obj, "state", json_object_new_int(it->state));
                 if (it->state == EXTRACT_STATE_FAILED)
                     json_object_object_add(extract_item_obj, "fail_reason", json_object_new_string(it->fail_reason.c_str()));
@@ -1617,6 +1668,7 @@ namespace HttpServer
             json_object_put(fileop_list);
         });
 
+#include "local_api.h"
         svr->Post("/fileop_start", [&](const Request &req, Response &res)
         {
             json_object *jobj = json_tokener_parse(req.body.c_str());
@@ -2063,11 +2115,6 @@ namespace HttpServer
         bg_extract_thread_started = false;
     }
 }
-#include "usecase/pkg_install_usecase.h"
-#include "usecase/file_manager_usecase.h"
-
-static Usecase::PkgInstallUseCase g_pkg_installer;
-static Usecase::FileManagerUseCase g_file_manager;
 
 namespace HttpServer { void RegisterNewEndpoints(httplib::Server* svr) {
     svr->Post("/api/install_remote_pkg", [&](const httplib::Request &req, httplib::Response &res) {

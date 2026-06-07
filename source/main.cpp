@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "server/http_server.h"
 #include "config.h"
@@ -15,10 +16,19 @@
 #include "server/legacy_dpi_server.h"
 #include "dbglogger.h"
 
+static void signal_handler(int sig)
+{
+	dbglogger_log("Received signal %d, shutting down server...", sig);
+	HttpServer::Stop();
+}
+
 int main(int argc, char *argv[])
 {
 	dbglogger_init_str("file:/data/homebrew/ezremote-client/server.log");
 	dbglogger_log("ezremote-server dbglogger started.");
+
+	signal(SIGINT, signal_handler);
+	signal(SIGTERM, signal_handler);
 
     CONFIG::LoadPackageInstallHostData();
     CONFIG::LoadBgDownloadData();
